@@ -30,7 +30,7 @@ export default function CertificateScreen({ agentId }: { agentId: string }) {
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
 
   const buildData = (): CertData | null => {
-    if (!agent || !campaign) return null;
+    if (!agent) return null;
     return buildCertData(agent, campaign, achievements);
   };
 
@@ -50,7 +50,7 @@ export default function CertificateScreen({ agentId }: { agentId: string }) {
   }, [agent, achievements]);
 
   if (notFound) return null;
-  if (!agent || !campaign) {
+  if (!agent) {
     return (
       <div className="mx-auto max-w-[720px] px-6 py-24 text-center">
         <p className="text-sm text-dim">Loading agent…</p>
@@ -76,7 +76,11 @@ export default function CertificateScreen({ agentId }: { agentId: string }) {
   return (
     <div className="mx-auto max-w-[1240px] px-6 py-16">
       <div className="subnav">
-        <button type="button" className="back-link" onClick={() => router.push(`/ship/${agent.campaignId}`)}>
+        <button
+          type="button"
+          className="back-link"
+          onClick={() => router.push(campaign ? `/ship/${agent.campaignId}` : "/campaigns")}
+        >
           ← back to ship day
         </button>
       </div>

@@ -45,6 +45,14 @@ export interface CreateAgentPayload {
   goal?: string;
   description?: string;
   extraFeatures?: Record<string, unknown>;
+  /** Attached tools (Phase 3). The backend bakes a TOOL_CALL contract
+   * into agent_instructions and persists these to the tool_defs registry. */
+  tools?: {
+    toolName: string;
+    description: string;
+    paramsSchema: Record<string, string>;
+    endpointUrl: string;
+  }[];
 }
 
 export async function createAgent(
@@ -213,4 +221,82 @@ export interface LeaderboardEntry {
 export async function getLeaderboard(limit = 20): Promise<LeaderboardEntry[]> {
   const res = await fetch(`${API_URL}/api/leaderboard?limit=${limit}`);
   return handle<LeaderboardEntry[]>(res);
+}
+
+export interface KnowledgeDoc {
+  id: string;
+  agentId: string;
+  filename: string;
+  chunkCount: number;
+  charCount: number;
+  uploadedAt: string;
+}
+
+/** Text-only ingestion — the backend chunks + embeds `content` and upserts
+ * it into that agent's Qdrant collection. `topK` rides along as forward
+ * -compatible metadata; retrieval depth is still fixed server-side. */
+export async function uploadKnowledge(
+  agentId: string,
+  payload: { filename: string; content: string; topK?: number }
+): Promise<KnowledgeDoc> {
+  const res = await fetch(`${API_URL}/api/knowledge/upload/${agentId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handle<KnowledgeDoc>(res);
+}
+
+export async function listKnowledgeDocs(agentId: string): Promise<KnowledgeDoc[]> {
+  const res = await fetch(`${API_URL}/api/knowledge/${agentId}`);
+  return handle<KnowledgeDoc[]>(res);
+}
+
+export async function deleteKnowledgeDoc(
+  agentId: string,
+  docId: string
+): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/api/knowledge/${agentId}/${docId}`, {
+    method: "DELETE",
+  });
+  return handle<{ deleted: boolean; id: string }>(res);
+}
+
+export interface ApiToolDef {
+  id: string;
+  agentId: string;
+  toolName: string;
+  description: string;
+  paramsSchema: Record<string, string>;
+  endpointUrl: string;
+  createdAt: string;
+}
+
+/** Register a tool on an already-shipped agent. Note: for the contract to
+ * take effect the agent's instructions must mention it — attaching tools
+ * at build time (via createAgent's `tools`) is the path that bakes the
+ * contract in; this route is the standalone registry endpoint (§9). */
+export async function registerTool(
+  agentId: string,
+  payload: { toolName: string; description: string; paramsSchema: Record<string, string>; endpointUrl: string }
+): Promise<ApiToolDef> {
+  const res = await fetch(`${API_URL}/api/tools/${agentId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handle<ApiToolDef>(res);
+}
+
+export async function listTools(agentId: string): Promise<ApiToolDef[]> {
+  const res = await fetch(`${API_URL}/api/tools/${agentId}`);
+  return handle<ApiToolDef[]>(res);
+}
+
+export async function deleteTool(
+  agentId: string,
+  toolId: string
+): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/api/tools/${agentId}/${toolId}`, { method: "DELETE" });
+  return handle<{ deleted: boolean; id: string }>(res);
 }

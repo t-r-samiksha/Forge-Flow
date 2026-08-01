@@ -20,6 +20,8 @@ import {
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import AgentCardReveal from "@/components/ship/AgentCardReveal";
+import KnowledgeUploadForm from "@/components/knowledge/KnowledgeUploadForm";
+import type { KnowledgeDoc } from "@/lib/api";
 
 interface ResolvedLine {
   id: number;
@@ -66,6 +68,7 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
   const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notConfigured, setNotConfigured] = useState(false);
+  const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDoc[]>([]);
 
   const [query, setQuery] = useState(runScenarios[0]!.q);
   const [runCount, setRunCount] = useState(0);
@@ -381,6 +384,34 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
             campaign={campaign}
             model={agent.config[campaign.lyzrConfig.modelFromSlot ?? "model"] ?? ""}
           />
+        )}
+
+        {agent && showSource && (
+          <div
+            className="mx-auto mt-6 max-w-[560px] rounded-2xl border border-line p-5 text-left"
+            style={{ background: "linear-gradient(180deg, var(--color-panel), var(--color-panel-2))" }}
+          >
+            <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[.13em] text-mute">
+              Optional
+            </div>
+            <h3 className="mb-1 font-display text-base font-semibold">
+              Give it a knowledge base
+            </h3>
+            <p className="mb-4 font-mono text-[11.5px] leading-[1.6] text-dim">
+              Upload docs or paste text and this agent will search them before answering — skip
+              this and it ships fine on instructions alone.
+            </p>
+            <KnowledgeUploadForm
+              agentId={agent.lyzrAgentId}
+              onUploaded={(doc) => setKnowledgeDocs((prev) => [doc, ...prev])}
+            />
+            {knowledgeDocs.length > 0 && (
+              <div className="mt-3 font-mono text-[11px] text-mute">
+                {knowledgeDocs.length} doc{knowledgeDocs.length === 1 ? "" : "s"} attached — manage
+                anytime from the agent&apos;s Doc page.
+              </div>
+            )}
+          </div>
         )}
 
         {agent && showSource && (

@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { db } from "../db";
 import { createLyzrAgent, LyzrConfigError } from "../services/lyzr";
 import { calcForgeScore } from "../services/forgeScoring";
-import { withKnowledgeCorpus } from "../services/knowledge";
+import { copyToolDefs, toolContractForAgent } from "./tools";
 
 const router = Router();
 
@@ -80,12 +80,18 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
     const currentConfig: Record<string, string> = JSON.parse(row.config || "{}");
     const nextConfig = { ...currentConfig, ...updatedSlots };
 
+    // Re-forge mints a new Lyzr agent_id — carry the tool contract into
+    // the new instructions and re-key tool_defs onto the new id, so a
+    // tool-equipped agent stays tool-equipped after an edit.
+    const toolContract = toolContractForAgent(row.lyzr_agent_id);
+
     const { agentId: newLyzrId, payload } = await createLyzrAgent({
       name: row.name,
-      instructions: withKnowledgeCorpus(row.campaign_id, instructions),
+      instructions: instructions + toolContract,
       model,
       temperature: Number(temperature),
     });
+    if (toolContract) copyToolDefs(row.lyzr_agent_id, newLyzrId);
 
     const topKRaw = parseInt(nextConfig.ret ?? "", 10);
     const forgeScore = calcForgeScore(

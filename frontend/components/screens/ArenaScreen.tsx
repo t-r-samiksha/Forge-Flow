@@ -13,6 +13,7 @@ import { getCampaign, resolveAgentConfig, type ArenaAttack } from "@/lib/campaig
 import { confettiBurst, showToast } from "@/lib/effects";
 import { useGameStore } from "@/lib/store";
 import { classifyHeld } from "@/lib/arenaHeuristics";
+import { FREEFORM_ARENA_ATTACKS, freeformShippedConfig } from "@/lib/freeformAgentView";
 
 interface AttackResult {
   attack: ArenaAttack;
@@ -52,7 +53,10 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
   }, [results, activeIndex]);
 
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
-  const attacks = campaign?.arenaAttacks ?? [];
+  // A fixed campaign ships its own arenaAttacks; a freeform agent has no
+  // campaign to draw one from, so it uses a generic, narrative-free set —
+  // real prompts against the real agent either way (see freeformAgentView.ts).
+  const attacks = campaign?.arenaAttacks ?? FREEFORM_ARENA_ATTACKS;
   const heldCount = results.filter((r) => r.held).length;
   const finished = done && results.length === attacks.length && attacks.length > 0;
   const win = finished && heldCount >= Math.ceil(attacks.length * 0.75);
@@ -73,7 +77,6 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
       </div>
     );
   }
-  if (!campaign) return null;
 
   const start = async () => {
     if (running) return;
@@ -263,8 +266,11 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
 
         {!running && (
           <p className="mt-8 text-center font-mono text-[11px] text-mute">
-            Each prompt goes to <b className="text-dim">{resolveAgentConfig(campaign, agent.config).model}</b> via
-            your real shipped agent — held/broke is read from what it actually said back.
+            Each prompt goes to{" "}
+            <b className="text-dim">
+              {campaign ? resolveAgentConfig(campaign, agent.config).model : freeformShippedConfig(agent).model}
+            </b>{" "}
+            via your real shipped agent — held/broke is read from what it actually said back.
           </p>
         )}
       </div>

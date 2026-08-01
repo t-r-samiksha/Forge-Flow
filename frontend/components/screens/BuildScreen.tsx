@@ -373,7 +373,10 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
   if (showIntro) {
     return (
       <MissionIntro
-        mission={mission}
+        title={mission.title}
+        descHtml={mission.descHtml}
+        steps={mission.steps}
+        reward={mission.reward}
         missionNumber={missionIdx + 1}
         totalMissions={missions.length}
         onBegin={() => setShowIntro(false)}

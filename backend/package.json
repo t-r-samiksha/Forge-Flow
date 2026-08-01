@@ -12,6 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@qdrant/js-client-rest": "^1.18.0",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^13.0.2",
     "cors": "^2.8.6",

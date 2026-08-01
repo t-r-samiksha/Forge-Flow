@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import { getCampaign, resolveAgentConfig, type ArenaAttack } from "@/lib/campaigns";
+import { FREEFORM_ARENA_ATTACKS, freeformShippedConfig } from "@/lib/freeformAgentView";
 import { estimateCost, knownModelKeys } from "@/lib/estimator";
 import { buildShareUrl } from "@/lib/share";
 import { confettiBurst, showToast } from "@/lib/effects";
@@ -60,19 +61,22 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
   }, [notFound, router]);
 
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
-  const fixAttack: ArenaAttack | null =
-    campaign && fixIndex !== null ? campaign.arenaAttacks[fixIndex] ?? null : null;
+  // A fixed campaign ships its own arenaAttacks; freeform has no campaign to
+  // draw one from, so a "Test this fix in Compare →" link from Arena (which
+  // reads the same fallback list) still resolves to a real attack.
+  const attacks = campaign?.arenaAttacks ?? FREEFORM_ARENA_ATTACKS;
+  const fixAttack: ArenaAttack | null = fixIndex !== null ? attacks[fixIndex] ?? null : null;
 
   useEffect(() => {
-    if (!agent || !campaign || initialized) return;
-    const a = resolveAgentConfig(campaign, agent.config);
+    if (!agent || initialized) return;
+    const a = campaign ? resolveAgentConfig(campaign, agent.config) : freeformShippedConfig(agent);
     if (fixAttack) {
       setQuery(fixAttack.prompt);
       setBModel(a.model);
       setBTemp(String(fixAttack.fixTemp));
       setBInstr(`${a.instructions} ${fixAttack.fixInstruction}`.trim());
     } else {
-      setQuery(campaign.runScenarios[0]?.q ?? campaign.chatScenarios[0]?.q ?? "");
+      setQuery(campaign?.runScenarios[0]?.q ?? campaign?.chatScenarios[0]?.q ?? "");
       setBModel(a.model === "gemini-2.5-pro" ? "gemini-2.5-flash" : "gemini-2.5-pro");
       setBTemp(String(a.temperature));
       setBInstr(a.instructions);
@@ -103,7 +107,7 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
   }, [agent, campaign, bInstr]);
 
   if (notFound) return null;
-  if (!agent || !campaign) {
+  if (!agent) {
     return (
       <div className="mx-auto max-w-[720px] px-6 py-24 text-center">
         <p className="text-sm text-dim">Loading agent…</p>
@@ -111,7 +115,8 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
     );
   }
 
-  const a = resolveAgentConfig(campaign, agent.config);
+  const freeformCfg = campaign ? null : freeformShippedConfig(agent);
+  const a = campaign ? resolveAgentConfig(campaign, agent.config) : freeformCfg!;
   const hasTopK = "ret" in agent.config;
   const aTopK = agent.config.ret ?? "5";
   const securityMode = !!fixAttack && query.trim() === fixAttack.prompt;
@@ -152,9 +157,9 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
       model: bModel,
       temperature: parseFloat(bTemp) || 0,
       message: q,
-      role: campaign.lyzrConfig.role,
-      goal: campaign.lyzrConfig.goal,
-      description: campaign.lyzrConfig.description,
+      role: campaign ? campaign.lyzrConfig.role : freeformCfg!.role,
+      goal: campaign ? campaign.lyzrConfig.goal : freeformCfg!.goal,
+      description: campaign ? campaign.lyzrConfig.description : "Agent built in ForgeFlow",
     })
       .then(({ response }) => setBResponse(response))
       .catch((err) => {
@@ -176,15 +181,20 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
     setFinalizing(true);
     setErrorMsg(null);
     try {
-      const instrKey = campaign.lyzrConfig.instructionsFromSlot ?? "instr";
-      const modelKey = campaign.lyzrConfig.modelFromSlot ?? "model";
-      const tempKey = campaign.lyzrConfig.tempFromSlot ?? "temp";
-      const updatedSlots: Record<string, string> = {
-        [instrKey]: bInstr,
-        [modelKey]: bModel,
-        [tempKey]: bTemp,
-      };
-      const estimateMin = campaign.missions.reduce((sum, m) => sum + m.estimateMin, 0);
+      // Campaign agents store their live values inside `config` under
+      // campaign-defined slot keys, so a re-forge has to write them back
+      // there. Freeform agents never used that slot system (their config is
+      // always {}) — instructions/model/temperature are the real re-forge
+      // inputs on their own, so there's nothing to merge into `config`.
+      let updatedSlots: Record<string, string> = {};
+      let estimateMin = 15; // matches the estimate freeform's own ship() uses
+      if (campaign) {
+        const instrKey = campaign.lyzrConfig.instructionsFromSlot ?? "instr";
+        const modelKey = campaign.lyzrConfig.modelFromSlot ?? "model";
+        const tempKey = campaign.lyzrConfig.tempFromSlot ?? "temp";
+        updatedSlots = { [instrKey]: bInstr, [modelKey]: bModel, [tempKey]: bTemp };
+        estimateMin = campaign.missions.reduce((sum, m) => sum + m.estimateMin, 0);
+      }
       const result = await reforgeAgent(getUserId(), agentId, {
         updatedSlots,
         instructions: bInstr,
@@ -240,7 +250,7 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
       </div>
       <div className="cmp-shell">
         <div className="learn-hero" style={{ marginBottom: 22 }}>
-          <div className="learn-kicker">{campaign.title} · fork test</div>
+          <div className="learn-kicker">{campaign?.title ?? "Freeform Build"} · fork test</div>
           <h1>
             Same question. <span className="accent">Different agent.</span>
           </h1>

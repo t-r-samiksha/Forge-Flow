@@ -120,7 +120,7 @@ function TiltCard({
   return (
     <div
       ref={cardRef}
-      onClick={shipped ? undefined : () => router.push(`/setup/${campaign.id}`)}
+      onClick={shipped ? undefined : () => router.push(`/build/new?template=${campaign.id}`)}
       onMouseMove={handleMove}
       onMouseLeave={handleLeave}
       style={style}
@@ -260,6 +260,28 @@ function TiltCard({
   );
 }
 
+function ScratchCard() {
+  const router = useRouter();
+  return (
+    <div className="ccard" onClick={() => router.push("/build/new")}>
+      <div className="ccard-icon">🛠️</div>
+      <h3>Start from scratch</h3>
+      <p>
+        Freeform build — name it, write real instructions, pick a model, and ship any agent.
+        Not locked to a scenario.
+      </p>
+      <div className="ccard-stack">
+        <span className="tag">Freeform</span>
+        <span className="tag">Any agent</span>
+      </div>
+      <div className="ccard-meta">
+        <span>self-paced</span>
+      </div>
+      <div className="ccard-go">start building →</div>
+    </div>
+  );
+}
+
 interface LockedCardProps {
   icon: string;
   title: string;
@@ -375,6 +397,7 @@ export default function CampaignMapScreen() {
           <BadgeShelf />
 
           <div className="campaign-grid">
+            <ScratchCard />
             <TiltCard campaign={retrieverCampaign} shipped={shippedRetriever} skipEntrance={heroPlayed} />
             {toolAgentUnlocked ? (
               <TiltCard campaign={toolAgentCampaign} shipped={shippedToolAgent} skipEntrance={heroPlayed} />

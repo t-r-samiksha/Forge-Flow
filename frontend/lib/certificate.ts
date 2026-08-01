@@ -1,6 +1,7 @@
 import type { ApiForgedAgent } from "./api";
 import { resolveAgentConfig, type Campaign } from "./campaigns";
 import { ACHIEVEMENT_DEFS } from "./achievements";
+import { freeformShippedConfig } from "./freeformAgentView";
 
 export interface CertData {
   agentName: string;
@@ -21,17 +22,19 @@ function formatBuildTime(totalSeconds: number): string {
 
 export function buildCertData(
   agent: ApiForgedAgent,
-  campaign: Campaign,
+  campaign: Campaign | undefined,
   achievements: string[]
 ): CertData {
-  const { model } = resolveAgentConfig(campaign, agent.config);
+  const model = campaign
+    ? resolveAgentConfig(campaign, agent.config).model
+    : freeformShippedConfig(agent).model;
   const badges = achievements
     .map((key) => ACHIEVEMENT_DEFS[key])
     .filter((d): d is NonNullable<typeof d> => !!d)
     .map((d) => `${d.icon} ${d.label}`);
   return {
     agentName: agent.name,
-    campaignTitle: campaign.title,
+    campaignTitle: campaign?.title ?? "Freeform Build",
     model,
     forgeScore: agent.forgeScore,
     xpEarned: agent.xpEarned,

@@ -39,3 +39,22 @@ CREATE TABLE IF NOT EXISTS achievements (
   unlocked_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, badge_key)
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_docs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  chunk_count INTEGER DEFAULT 0,
+  char_count INTEGER DEFAULT 0,
+  uploaded_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tool_defs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  description TEXT,
+  params_schema TEXT,       -- JSON: { paramName: "string" | "number" | "boolean" }
+  endpoint_url TEXT,        -- real webhook URL, or "builtin:weather" sentinel
+  created_at TEXT DEFAULT (datetime('now'))
+);

@@ -12,6 +12,7 @@ import InspectorSection from "@/components/hub/InspectorSection";
 import TestConsole from "@/components/hub/TestConsole";
 import CodeStructureSection from "@/components/hub/CodeStructureSection";
 import ActionsPanel from "@/components/hub/ActionsPanel";
+import KnowledgePanel from "@/components/knowledge/KnowledgePanel";
 
 function formatTime(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60)
@@ -61,6 +62,7 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
       { id: "l-full", label: "Full assembled code" },
       { id: "l-structure", label: "Code structure (raw)" },
       { id: "l-test", label: "Test console" },
+      { id: "l-knowledge", label: "Knowledge" },
       { id: "l-cost", label: "Cost & latency" },
       { id: "l-glossary", label: "Glossary" },
     ],
@@ -325,6 +327,17 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
               quick check.
             </p>
             <TestConsole agentId={agent.lyzrAgentId} sessionId={testSessionIdRef.current} />
+          </section>
+
+          <section id="l-knowledge">
+            <h2>
+              <span className="sn">📚</span> Knowledge
+            </h2>
+            <p>
+              Optional grounding — any docs ingested here get chunked, embedded, and searched
+              against before each chat reply, and cited from instead of the model guessing.
+            </p>
+            <KnowledgePanel agentId={agent.lyzrAgentId} />
           </section>
 
           <section id="l-cost">

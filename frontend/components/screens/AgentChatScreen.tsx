@@ -9,9 +9,10 @@ import {
   type ApiForgedAgent,
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
-import { getCampaign, resolveAgentConfig } from "@/lib/campaigns";
+import { getCampaign, resolveAgentConfig, type Campaign } from "@/lib/campaigns";
 import { reducedMotion } from "@/lib/effects";
 import { useGameStore } from "@/lib/store";
+import { freeformChatGreeting, freeformShippedConfig } from "@/lib/freeformAgentView";
 
 interface ChatMessage {
   id: number;
@@ -49,10 +50,8 @@ export default function AgentChatScreen({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     if (agent && messages.length === 0) {
-      const greeting = getCampaign(agent.campaignId)?.chatPage.greeting;
-      if (greeting) {
-        setMessages([{ id: msgId++, role: "agent", text: greeting }]);
-      }
+      const greeting = getCampaign(agent.campaignId)?.chatPage.greeting ?? freeformChatGreeting(agent.name);
+      setMessages([{ id: msgId++, role: "agent", text: greeting }]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent]);
@@ -72,8 +71,13 @@ export default function AgentChatScreen({ agentId }: { agentId: string }) {
   }
 
   const campaign = getCampaign(agent.campaignId);
-  if (!campaign) return null;
-  const headerBadges = campaign.chatPage.headerBadges(agent.config);
+  const freeformCfg = campaign ? null : freeformShippedConfig(agent);
+  const displayName = campaign?.chatPage.displayName ?? freeformCfg!.name;
+  const headerIcon = campaign?.agentCardTemplate.icon ?? "⬡";
+  const gradientFrom = campaign?.agentCardTemplate.gradientFrom ?? "var(--color-violet)";
+  const gradientTo = campaign?.agentCardTemplate.gradientTo ?? "var(--color-violet-deep)";
+  const headerBadges = campaign ? campaign.chatPage.headerBadges(agent.config) : [`role: ${freeformCfg!.role}`];
+  const chatChips = campaign?.chatScenarios.slice(0, 3) ?? [];
 
   const send = async (raw: string) => {
     const q = raw.trim();
@@ -96,7 +100,12 @@ export default function AgentChatScreen({ agentId }: { agentId: string }) {
       const responseId = msgId++;
       setMessages((m) => [
         ...m,
-        { id: responseId, role: "agent", text: response, src: campaign.chatPage.sourceLine(agent.config) },
+        {
+          id: responseId,
+          role: "agent",
+          text: response,
+          src: campaign ? campaign.chatPage.sourceLine(agent.config) : undefined,
+        },
       ]);
 
       const reduce = reducedMotion();
@@ -145,13 +154,13 @@ export default function AgentChatScreen({ agentId }: { agentId: string }) {
               <div
                 className="chat-av"
                 style={{
-                  background: `linear-gradient(135deg, ${campaign.agentCardTemplate.gradientFrom}, ${campaign.agentCardTemplate.gradientTo})`,
+                  background: `linear-gradient(135deg, ${gradientFrom}, ${gradientTo})`,
                 }}
               >
-                {campaign.agentCardTemplate.icon}
+                {headerIcon}
               </div>
               <div>
-                <b>{campaign.chatPage.displayName}</b>
+                <b>{displayName}</b>
                 <div className="chat-head-sub">
                   {headerBadges.map((badge) => (
                     <span key={badge}>{badge}</span>
@@ -181,13 +190,15 @@ export default function AgentChatScreen({ agentId }: { agentId: string }) {
             )}
           </div>
 
-          <div className="chat-chips">
-            {campaign.chatScenarios.slice(0, 3).map((s) => (
-              <button key={s.q} type="button" className="chat-chip" disabled={sending} onClick={() => send(s.q)}>
-                {s.q}
-              </button>
-            ))}
-          </div>
+          {chatChips.length > 0 && (
+            <div className="chat-chips">
+              {chatChips.map((s) => (
+                <button key={s.q} type="button" className="chat-chip" disabled={sending} onClick={() => send(s.q)}>
+                  {s.q}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="chat-input-row">
             <input
@@ -223,15 +234,20 @@ function ChatConfigSidebar({
   campaign,
 }: {
   agent: ApiForgedAgent;
-  campaign: NonNullable<ReturnType<typeof getCampaign>>;
+  campaign: Campaign | undefined;
 }) {
-  const current = resolveAgentConfig(campaign, agent.config);
-  const original = resolveAgentConfig(campaign, agent.originalConfig);
+  const freeformCfg = campaign ? null : freeformShippedConfig(agent);
+  const current = campaign ? resolveAgentConfig(campaign, agent.config) : freeformCfg!;
+  const original = campaign ? resolveAgentConfig(campaign, agent.originalConfig) : freeformCfg!;
   const finalized = agent.version > 1 || !!agent.lastEditedAt;
+  // Freeform agents don't go through the campaign slot-diff system (no
+  // originalConfig/config distinction — both are always {}), so there's
+  // nothing real to diff against; only campaign agents can show "what changed".
   const changed =
-    current.instructions !== original.instructions ||
-    current.model !== original.model ||
-    current.temperature !== original.temperature;
+    !!campaign &&
+    (current.instructions !== original.instructions ||
+      current.model !== original.model ||
+      current.temperature !== original.temperature);
 
   return (
     <aside className="chat-cfg">
@@ -240,7 +256,7 @@ function ChatConfigSidebar({
         {finalized ? `✓ finalized · v${agent.version}` : `🔨 shipped · v${agent.version}`}
       </span>
       <ConfigRow label="name" value={agent.name} />
-      <ConfigRow label="role" value={campaign.lyzrConfig.role} />
+      <ConfigRow label="role" value={campaign ? campaign.lyzrConfig.role : freeformCfg!.role} />
       <ConfigRow label="model" value={current.model} />
       <ConfigRow label="temperature" value={String(current.temperature)} />
       <ConfigRow label="instruction" value={current.instructions} />

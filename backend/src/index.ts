@@ -11,6 +11,8 @@ import progressRoutes from "./routes/progress";
 import mentorRoutes from "./routes/mentor";
 import leaderboardRoutes from "./routes/leaderboard";
 import authRoutes from "./routes/auth";
+import knowledgeRoutes from "./routes/knowledge";
+import toolRoutes from "./routes/tools";
 
 const app = express();
 
@@ -27,6 +29,8 @@ app.use("/api/progress", progressRoutes);
 app.use("/api/mentor", mentorRoutes);
 app.use("/api/leaderboard", leaderboardRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/knowledge", knowledgeRoutes);
+app.use("/api/tools", toolRoutes);
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
