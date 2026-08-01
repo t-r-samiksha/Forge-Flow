@@ -1,0 +1,41 @@
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  display_name TEXT,
+  xp INTEGER DEFAULT 0,
+  rank TEXT DEFAULT 'Recruit',
+  streak INTEGER DEFAULT 0,
+  last_forge_date TEXT,
+  completed_missions TEXT DEFAULT '[]',
+  unlocked_campaigns TEXT DEFAULT '["retriever"]',
+  mentor_questions_asked INTEGER DEFAULT 0,
+  chat_queries_run INTEGER DEFAULT 0,
+  active_campaign_id TEXT,
+  current_mission_index INTEGER DEFAULT 0,
+  build_slot_values TEXT DEFAULT '{}',
+  build_timer_seconds INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS forged_agents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  campaign_id TEXT,
+  name TEXT,
+  lyzr_agent_id TEXT,
+  config TEXT,
+  original_config TEXT,
+  lyzr_payload TEXT,
+  forge_score INTEGER,
+  forge_time INTEGER,
+  xp_earned INTEGER,
+  version INTEGER DEFAULT 1,
+  forged_at TEXT DEFAULT (datetime('now')),
+  last_edited_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS achievements (
+  user_id TEXT,
+  badge_key TEXT,
+  unlocked_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, badge_key)
+);
