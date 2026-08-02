@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
 export default function Home() {
-  redirect("/story/retriever");
+  // Temporarily disabled — redirect("/story/retriever");
+  redirect("/campaigns");
 }

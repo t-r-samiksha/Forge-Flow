@@ -6,7 +6,7 @@ import FreeformBuildScreen from "./FreeformBuildScreen";
 import MissionIntro from "@/components/build/MissionIntro";
 import MissionRail from "@/components/build/MissionRail";
 import { createCrew, getProgress, saveProgress, type ApiForgedAgent } from "@/lib/api";
-import { getUserId } from "@/lib/session";
+import { getUserId, initAuth } from "@/lib/session";
 import { generateCrewConfigPy, generateOrchestratorPy } from "@/lib/crewCode";
 import { crewDefineSegments } from "@/lib/freeformCode";
 import { highlightPython } from "@/lib/highlightPython";
@@ -165,7 +165,10 @@ export default function CrewBuildScreen() {
   };
 
   useEffect(() => {
-    getProgress(getUserId())
+    // Waits for initAuth() first (§36/§37) — same real race as
+    // FreeformBuildScreen's own resume-check.
+    initAuth()
+      .then(() => getProgress(getUserId()))
       .then((progress) => {
         const raw = progress.activeCampaignId === "crew" ? progress.slotValues[CREW_SNAPSHOT_KEY] : undefined;
         if (raw) {

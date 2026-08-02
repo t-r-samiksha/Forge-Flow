@@ -9,7 +9,7 @@ import {
   LyzrNotConfiguredError,
   type ApiForgedAgent,
 } from "@/lib/api";
-import { getUserId } from "@/lib/session";
+import { getUserId, initAuth } from "@/lib/session";
 import { getTemplate, getTemplateLevelDefaults } from "@/lib/agentTemplates";
 import { getCampaign } from "@/lib/campaigns";
 import { blankDraft, type AgentDraft } from "@/lib/types";
@@ -261,7 +261,13 @@ export default function FreeformBuildScreen({
       return;
     }
     const requestedTemplateId = templateId ?? null;
-    getProgress(getUserId())
+    // Waits for initAuth() first (§36/§37) — getUserId() read before the
+    // real Supabase session finishes loading returns "", which froze this
+    // resume-check's request URL with an empty id (a real 404, confirmed
+    // live against the deployed app) instead of ever checking for a real
+    // in-progress draft.
+    initAuth()
+      .then(() => getProgress(getUserId()))
       .then((progress) => {
         const raw = progress.activeCampaignId === "freeform" ? progress.slotValues[FREEFORM_SNAPSHOT_KEY] : undefined;
         if (raw) {
