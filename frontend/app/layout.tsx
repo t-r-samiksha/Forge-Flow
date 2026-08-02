@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import AmbientBackground from "@/components/effects/AmbientBackground";
-import BootSequence from "@/components/effects/BootSequence";
+// Temporarily disabled — import BootSequence from "@/components/effects/BootSequence";
 import TopBar from "@/components/layout/TopBar";
 import RouteTransition from "@/components/layout/RouteTransition";
 import MentorPanel from "@/components/layout/MentorPanel";
@@ -31,7 +31,7 @@ export default function RootLayout({
       </head>
       <body>
         <AmbientBackground />
-        <BootSequence />
+        {/* Temporarily disabled — <BootSequence /> */}
         <AuthBoot />
         <ProgressSync />
         <TimerTicker />
