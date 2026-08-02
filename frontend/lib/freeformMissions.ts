@@ -259,16 +259,24 @@ export function activeLevels(opts: BuildOpts): { level: FreeformLevel; missions:
 export function missionValidate(mission: FreeformMission, ctx: LintCtx): ValidationLine[] {
   if (mission.key === "toolDefine" || mission.key === "toolWire") {
     const n = ctx.draft.tools?.length ?? 0;
-    return [
-      {
-        field: "collection",
-        ok: true,
-        warn: false,
-        blocking: false,
-        icon: n > 0 ? "✓" : "▸",
-        msg: n > 0 ? `${n} tool${n === 1 ? "" : "s"} attached` : "no tools attached yet (optional)",
-      },
-    ];
+    // At least one real committed tool already exists — Continue shouldn't
+    // stay blocked forever just because the NEXT (uncommitted) tool draft
+    // is sitting blank. Zero tools committed means the in-progress draft's
+    // real per-field lint below is what actually gates progress, same as
+    // every other field-bearing mission.
+    if (n > 0) {
+      return [
+        {
+          field: "collection",
+          ok: true,
+          warn: false,
+          blocking: false,
+          icon: "✓",
+          msg: `${n} tool${n === 1 ? "" : "s"} attached`,
+        },
+      ];
+    }
+    return lintMission(mission.key, ctx);
   }
   if (mission.key === "ship" || mission.key === "upload") return [];
   return lintMission(mission.key, ctx);

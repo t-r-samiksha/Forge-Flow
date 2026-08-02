@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { db } from "../db";
 import { createLyzrAgent, chatWithLyzrAgent, LyzrConfigError } from "../services/lyzr";
+import { buildRouteContract } from "../services/crew";
 import { calcForgeScore } from "../services/forgeScoring";
 import { awardAchievement } from "../services/achievements";
 import { embedText } from "../services/embeddings";
@@ -11,6 +12,7 @@ import {
   executeTool,
   parseToolCall,
   validateArgs,
+  validateToolDef,
   type ParamsSchema,
   type ToolDefInput,
 } from "../services/tools";
@@ -18,17 +20,17 @@ import { getToolRows, insertToolDef } from "./tools";
 
 const router = Router();
 
-/** Normalizes the loosely-typed `tools` array a client may send with
- * /create into validated ToolDefInputs. Silently drops malformed entries
- * rather than failing the whole ship — a bad tool shouldn't block agent
- * creation, and the UI validates before sending anyway. */
-function normalizeIncomingTools(raw: unknown): ToolDefInput[] {
+/** Parses the loosely-typed `tools` array a client may send with /create
+ * into ToolDefInput shape. Deliberately does not validate here — see
+ * validateTools() below — so /create can reject the whole request with a
+ * clear 400 (matching this route's existing required-field pattern, row
+ * 7b) instead of silently dropping a tool the developer explicitly typed. */
+function parseIncomingTools(raw: unknown): ToolDefInput[] {
   if (!Array.isArray(raw)) return [];
   const out: ToolDefInput[] = [];
   for (const t of raw) {
     const toolName = String(t?.toolName ?? t?.name ?? "").trim();
     const endpointUrl = String(t?.endpointUrl ?? "").trim();
-    if (!toolName || !endpointUrl || !/^[a-zA-Z0-9_]+$/.test(toolName)) continue;
     const schema: ParamsSchema = {};
     for (const [k, v] of Object.entries((t?.paramsSchema ?? {}) as Record<string, unknown>)) {
       const ty = String(v);
@@ -42,6 +44,20 @@ function normalizeIncomingTools(raw: unknown): ToolDefInput[] {
     });
   }
   return out;
+}
+
+/** Real backend-side validation for every tool a request tries to attach —
+ * the same checks §29's scoreToolConfig scores a tool against (services/
+ * tools.ts's validateToolDef, one shared definition), applied here as a
+ * hard gate instead of just partial credit after the fact. Returns one
+ * { toolName, errors } entry per invalid tool, empty array if all valid. */
+function validateTools(tools: ToolDefInput[]): { toolName: string; errors: string[] }[] {
+  const problems: { toolName: string; errors: string[] }[] = [];
+  for (const t of tools) {
+    const errors = validateToolDef(t);
+    if (errors.length > 0) problems.push({ toolName: t.toolName || "(unnamed)", errors });
+  }
+  return problems;
 }
 
 /** The real ReAct-style tool loop (FORGEFLOW_V3_SPEC.md §5). After Lyzr
@@ -163,6 +179,7 @@ router.post("/create", async (req: Request, res: Response) => {
       description,
       extraFeatures,
       tools,
+      crewRoles,
     } = req.body ?? {};
 
     if (!userId || !name || !instructions || !model || temperature === undefined) {
@@ -172,8 +189,21 @@ router.post("/create", async (req: Request, res: Response) => {
     // If tools are attached, the contract that makes the LLM emit
     // TOOL_CALL must be baked into agent_instructions at creation — the
     // tool_defs registry alone doesn't tell the model it can call out.
-    const toolDefs = normalizeIncomingTools(tools);
-    const instructionsWithTools = instructions + buildToolContract(toolDefs);
+    const toolDefs = parseIncomingTools(tools);
+    // Real backend-side gate (row 7b) — reject the whole request rather
+    // than silently dropping or shipping a broken tool, matching this
+    // route's own required-field validation above and PUT .../config's
+    // re-forge validation below.
+    const toolProblems = validateTools(toolDefs);
+    if (toolProblems.length > 0) {
+      return res.status(400).json({ error: "Invalid tool configuration", toolErrors: toolProblems });
+    }
+    // Same real pattern for a Crew orchestrator (FORGEFLOW_V3_SPEC.md §6):
+    // ROUTE_TO's contract is baked in at creation the same way, just from
+    // real role labels instead of tool definitions. A single agent is
+    // never both — crewRoles is only ever sent for an orchestrator build.
+    const routeContract = Array.isArray(crewRoles) ? buildRouteContract(crewRoles.map(String)) : "";
+    const instructionsWithTools = instructions + buildToolContract(toolDefs) + routeContract;
 
     const { agentId, payload } = await createLyzrAgent({
       name,
@@ -201,6 +231,12 @@ router.post("/create", async (req: Request, res: Response) => {
         temperature: Number(temperature),
         model,
         ...(isNaN(topKRaw) ? {} : { topK: topKRaw }),
+        tools: toolDefs.map((t) => ({
+          toolName: t.toolName,
+          description: t.description,
+          endpointUrl: t.endpointUrl,
+        })),
+        instructionsWithToolContract: instructionsWithTools,
       },
       Number(forgeTime) || 0,
       Number(estimateMin) || 22

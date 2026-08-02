@@ -47,6 +47,7 @@ export default function MentorPanel() {
   const mentorOpen = useGameStore((s) => s.mentorOpen);
   const toggleMentor = useGameStore((s) => s.toggleMentor);
   const activeContext = useGameStore((s) => s.activeContext);
+  const activeAgentId = useGameStore((s) => s.activeAgentId);
   const unlockAchievements = useGameStore((s) => s.unlockAchievements);
   const pathname = usePathname();
   const { mentor, mentorKey } = resolveMentor(pathname);
@@ -59,6 +60,10 @@ export default function MentorPanel() {
   const sessionIdRef = useRef(crypto.randomUUID());
 
   const context = mentorKey === "build" && activeContext ? activeContext : mentor.ctx;
+  // Same gate as context — only a "build"-key screen (which includes an
+  // agent's Doc page; see resolveMentor's fallback) can have a real
+  // agent in focus for Nova to ground on.
+  const agentIdForMentor = mentorKey === "build" ? activeAgentId : null;
 
   useEffect(() => {
     setMessages([]);
@@ -82,7 +87,8 @@ export default function MentorPanel() {
         q,
         context,
         getUserId(),
-        sessionIdRef.current
+        sessionIdRef.current,
+        agentIdForMentor
       );
       if (newAchievements?.length) unlockAchievements(newAchievements);
       setTyping(false);

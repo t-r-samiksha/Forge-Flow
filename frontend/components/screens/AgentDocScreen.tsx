@@ -41,6 +41,8 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
   const toggleInspectorMode = useGameStore((s) => s.toggleInspectorMode);
   const setInspectorSlot = useGameStore((s) => s.setInspectorSlot);
   const resetInspector = useGameStore((s) => s.resetInspector);
+  const setActiveContext = useGameStore((s) => s.setActiveContext);
+  const setActiveAgentId = useGameStore((s) => s.setActiveAgentId);
   const dirty = Object.keys(inspectorDirtySlots).length > 0;
 
   useEffect(() => {
@@ -52,6 +54,23 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
   useEffect(() => {
     if (notFound) router.replace("/campaigns");
   }, [notFound, router]);
+
+  // Real contextual grounding for Nova (§8): this agent's real internal id
+  // is what the backend uses to inject its real config/forge-score into
+  // the turn, on top of the platform-doc grounding every question gets.
+  // Covers both the campaign-agent and freeform Doc page render paths
+  // below, since `agent` is fetched once here regardless of which one
+  // eventually renders.
+  useEffect(() => {
+    if (!agent) return;
+    setActiveContext(`${agent.name} — Documentation`);
+    setActiveAgentId(agent.id);
+    return () => {
+      setActiveContext(null);
+      setActiveAgentId(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent?.id]);
 
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
   const missions = campaign?.missions ?? [];

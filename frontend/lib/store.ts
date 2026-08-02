@@ -60,6 +60,12 @@ interface GameState {
   // Mentor
   mentorOpen: boolean;
   activeContext: string | null;
+  /** Real internal forged_agents id for the agent this screen is about
+   * (e.g. its Doc page) — Nova's contextual grounding stack (§8) reads
+   * this to inject that agent's real config/forge-score, alongside
+   * activeContext's descriptive text. null on any screen not about one
+   * specific agent. */
+  activeAgentId: string | null;
 
   // Actions
   setBooted: (booted: boolean) => void;
@@ -102,6 +108,7 @@ interface GameState {
   tick: () => void;
   toggleMentor: () => void;
   setActiveContext: (context: string | null) => void;
+  setActiveAgentId: (agentId: string | null) => void;
   forgeAgent: (agent: ForgedAgent) => void;
   updateForgedAgent: (id: string, updates: Partial<ForgedAgent>) => void;
   setInspectorSlot: (key: string, value: string) => void;
@@ -150,6 +157,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   mentorOpen: false,
   activeContext: null,
+  activeAgentId: null,
 
   setBooted: (booted) => set({ booted }),
 
@@ -239,6 +247,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   toggleMentor: () => set((state) => ({ mentorOpen: !state.mentorOpen })),
 
   setActiveContext: (context) => set({ activeContext: context }),
+  setActiveAgentId: (agentId) => set({ activeAgentId: agentId }),
 
   forgeAgent: (agent) =>
     set((state) => ({

@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS tool_defs (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS crews (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL,
+  orchestrator_agent_id TEXT NOT NULL,  -- forged_agents.id (internal row id) of the real shipped orchestrator
+  name TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS crew_members (
+  crew_id TEXT NOT NULL,
+  forged_agent_id TEXT NOT NULL,  -- forged_agents.id (internal row id) of the real shipped sub-agent
+  role_label TEXT NOT NULL        -- free-text label from Level 1, matched against the orchestrator's real ROUTE_TO: <role_label>
+);
+
 CREATE TABLE IF NOT EXISTS redteam_runs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,        -- forged_agents.id (internal row id)

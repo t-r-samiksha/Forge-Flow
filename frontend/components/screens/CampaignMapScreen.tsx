@@ -484,32 +484,28 @@ function ScratchCard() {
   );
 }
 
-interface LockedCardProps {
-  icon: string;
-  title: string;
-  desc: string;
-  tags: string[];
-  meta: string;
-}
-
-function LockedCard({ icon, title, desc, tags, meta }: LockedCardProps) {
+/** Multi-Agent Crew (Phase 5) — a distinct top-level Build Type, not a
+ * template within the single-agent AgentDraft flow (FORGEFLOW_V3_SPEC.md
+ * §3b "Templates vs. Build Types"), so this routes to its own /build/crew
+ * flow rather than /build/new?template=. */
+function CrewCard() {
+  const router = useRouter();
   return (
-    <div className="ccard locked">
-      <div className="ccard-icon">{icon}</div>
-      <h3>
-        {title} <span className="badge-soon">soon</span>
-      </h3>
-      <p>{desc}</p>
+    <div className="ccard" onClick={() => router.push("/build/crew")}>
+      <div className="ccard-icon">🕸️</div>
+      <h3>Build a Crew</h3>
+      <p>
+        N real sub-agents plus a real orchestrator that routes between them — each ships as its
+        own independent Lyzr agent.
+      </p>
       <div className="ccard-stack">
-        {tags.map((tag) => (
-          <span key={tag} className="tag">
-            {tag}
-          </span>
-        ))}
+        <span className="tag">Multi-agent</span>
+        <span className="tag">Orchestration</span>
       </div>
       <div className="ccard-meta">
-        <span>{meta}</span>
+        <span>own 4-level flow</span>
       </div>
+      <div className="ccard-go">start building →</div>
     </div>
   );
 }
@@ -521,12 +517,10 @@ const toolAgentCampaign = getCampaign("tool-agent")!;
 
 export default function CampaignMapScreen() {
   const startTimer = useGameStore((s) => s.startTimer);
-  const unlockedCampaigns = useGameStore((s) => s.unlockedCampaigns);
   const [shippedRetriever, setShippedRetriever] = useState<ApiForgedAgent | null>(null);
   const [shippedToolAgent, setShippedToolAgent] = useState<ApiForgedAgent | null>(null);
   const [freeformAgents, setFreeformAgents] = useState<ApiForgedAgent[]>([]);
   const [heroPlayed, setHeroPlayed] = useState(false);
-  const toolAgentUnlocked = unlockedCampaigns.includes("tool-agent");
 
   useEffect(() => {
     startTimer();
@@ -612,24 +606,8 @@ export default function CampaignMapScreen() {
           <div className="campaign-grid">
             <ScratchCard />
             <TiltCard campaign={retrieverCampaign} shipped={shippedRetriever} skipEntrance={heroPlayed} />
-            {toolAgentUnlocked ? (
-              <TiltCard campaign={toolAgentCampaign} shipped={shippedToolAgent} skipEntrance={heroPlayed} />
-            ) : (
-              <LockedCard
-                icon={toolAgentCampaign.card.icon}
-                title={toolAgentCampaign.title}
-                desc={toolAgentCampaign.card.description}
-                tags={toolAgentCampaign.card.tags}
-                meta="Unlocks after build 1"
-              />
-            )}
-            <LockedCard
-              icon="🕸️"
-              title="Multi-Agent Crew"
-              desc="Orchestrate several agents that hand work to each other across a pipeline."
-              tags={["Orchestration", "Lyzr"]}
-              meta="Unlocks after build 2"
-            />
+            <TiltCard campaign={toolAgentCampaign} shipped={shippedToolAgent} skipEntrance={heroPlayed} />
+            <CrewCard />
           </div>
 
           {/* Section 2: freeform-shipped agents — "manage what you've

@@ -18,7 +18,7 @@ export function effectiveDescription(): string {
   return DEFAULT_DESCRIPTION;
 }
 
-function pyLine(s: string): string {
+export function pyLine(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
 }
 function pyTriple(s: string): string {
@@ -134,56 +134,3 @@ export function generateChatHandlerPy(): string {
     return call_lyzr_chat(agent_id, grounded_message, session_id)`;
 }
 
-/** Port of the real tool loop in backend/src/services/tools.ts +
- * routes/agent.ts (FORGEFLOW_V3_SPEC.md §5). Shows the exact contract the
- * agent's instructions carry, the TOOL_CALL marker parse, the real HTTP
- * execution, and feeding the result back into the same Lyzr session.
- * Reflects the tools actually attached to this draft. */
-export function generateToolHandlerPy(draft: AgentDraft): string {
-  const tools = draft.tools ?? [];
-  const toolLines =
-    tools.length > 0
-      ? tools
-          .map((t) => {
-            const params =
-              Object.entries(t.paramsSchema)
-                .map(([k, v]) => `${k} (${v})`)
-                .join(", ") || "none";
-            return `#   - ${t.name}: ${t.description}. Parameters: ${params}. -> ${t.endpointUrl}`;
-          })
-          .join("\n")
-      : "#   (no tools attached yet — add one in Phase 5)";
-
-  return `# Tools attached to this agent:
-${toolLines}
-
-# Appended to agent_instructions at creation (this is TOOL_CONTRACT in agent.py):
-TOOL_CONTRACT = (
-    "\\n\\nYou have access to these tools: ...\\n"
-    'When you need a tool, respond with EXACTLY:\\n'
-    'TOOL_CALL: {"tool": "<tool_name>", "args": { ... }}\\n'
-    "and nothing else in that turn."
-)
-
-def handle_chat_with_tools(agent_id, session_id, response):
-    """Runs after the first Lyzr reply. No-op unless the agent has tools
-    AND the reply carries a TOOL_CALL marker."""
-    for _ in range(4):  # safety cap on tool rounds
-        call = parse_tool_call(response)          # find TOOL_CALL: {...}
-        if call is None:
-            return response                        # plain answer — done
-
-        tool = lookup_tool(agent_id, call["tool"])
-        err = validate_args(tool["params_schema"], call["args"])
-        if err:
-            response = lyzr_chat(agent_id, f"TOOL_ERROR: {err}", session_id)
-            continue
-
-        # real HTTP call — open-meteo for builtin:weather, else POST the webhook
-        result = execute_tool(tool["endpoint_url"], call["args"])
-
-        # feed the real result back into the SAME session, get the final answer
-        follow_up = f"TOOL_RESULT for {call['tool']}: {json.dumps(result)}"
-        response = lyzr_chat(agent_id, follow_up, session_id)
-    return response`;
-}

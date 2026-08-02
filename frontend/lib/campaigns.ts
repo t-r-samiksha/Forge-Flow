@@ -976,7 +976,7 @@ root_agent = <span class="fn">create_agent</span>(
 const toolAgent: Campaign = {
   id: "tool-agent",
   title: "Tool-Using Agent",
-  unlockAfter: "retriever",
+  unlockAfter: null,
   agentName: "Northwind Release Agent",
 
   lyzrConfig: {

@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  runRedTeam,
+  attackRedTeam,
+  judgeRedTeam,
   getAgent,
   LyzrNotConfiguredError,
   type ApiForgedAgent,
+  type RedTeamAttack,
   type RedTeamResult,
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
@@ -17,6 +19,7 @@ import { useGameStore } from "@/lib/store";
 
 interface AttackResult extends RedTeamResult {
   index: number;
+  errored?: boolean;
 }
 
 function prettyCategory(category: string): string {
@@ -28,11 +31,14 @@ function prettyCategory(category: string): string {
 export default function ArenaScreen({ agentId }: { agentId: string }) {
   const router = useRouter();
   const addXp = useGameStore((s) => s.addXp);
+  const unlockAchievements = useGameStore((s) => s.unlockAchievements);
 
   const [agent, setAgentState] = useState<ApiForgedAgent | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
+  const [attacks, setAttacks] = useState<RedTeamAttack[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const [results, setResults] = useState<AttackResult[]>([]);
   const [notConfigured, setNotConfigured] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -50,17 +56,17 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [results]);
+  }, [results, activeIndex]);
 
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
   const heldCount = results.filter((r) => r.verdict === "held").length;
-  const finished = done && results.length > 0 && !runError;
-  const win = finished && heldCount >= Math.ceil(results.length * 0.75);
+  const finished = done && results.length === attacks.length && attacks.length > 0 && !runError;
+  const win = finished && heldCount >= Math.ceil(attacks.length * 0.75);
 
   useEffect(() => {
     if (!finished) return;
     addXp(heldCount * 5);
-    showToast(`+${heldCount * 5} XP`, `Red team run complete — ${heldCount}/${results.length} held`);
+    showToast(`+${heldCount * 5} XP`, `Red team run complete — ${heldCount}/${attacks.length} held`);
     if (win) confettiBurst(40);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished]);
@@ -74,27 +80,67 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
     );
   }
 
+  /** Same two-step shape the legacy static-prompt Arena used: fetch the
+   * (now real, Redcap-tailored) prompts once, then chat+judge them one at
+   * a time, updating the UI as each real result lands — not waiting for
+   * all 5 before showing anything. */
   const start = async () => {
     if (running) return;
     setRunning(true);
     setDone(false);
+    setAttacks([]);
+    setActiveIndex(-1);
     setResults([]);
     setNotConfigured(false);
     setRunError(null);
 
+    let prompts: RedTeamAttack[];
     try {
-      const { results: real } = await runRedTeam(getUserId(), agentId);
-      setResults(real.map((r, i) => ({ ...r, index: i })));
+      const attackRes = await attackRedTeam(getUserId(), agentId);
+      prompts = attackRes.prompts;
+      setAttacks(prompts);
     } catch (err) {
       if (err instanceof LyzrNotConfiguredError) {
         setNotConfigured(true);
       } else {
-        setRunError(err instanceof Error ? err.message : "Red team run failed.");
+        setRunError(err instanceof Error ? err.message : "Attack generation failed.");
       }
-    } finally {
       setRunning(false);
-      setDone(true);
+      return;
     }
+
+    for (let i = 0; i < prompts.length; i++) {
+      setActiveIndex(i);
+      try {
+        const { result, newAchievements } = await judgeRedTeam(getUserId(), agentId, prompts[i]!);
+        if (newAchievements?.length) unlockAchievements(newAchievements);
+        setResults((prev) => [...prev, { ...result, index: i }]);
+      } catch (err) {
+        if (err instanceof LyzrNotConfiguredError) {
+          setNotConfigured(true);
+          setRunning(false);
+          setActiveIndex(-1);
+          return;
+        }
+        setResults((prev) => [
+          ...prev,
+          {
+            index: i,
+            category: prompts[i]!.category,
+            prompt: prompts[i]!.prompt,
+            response: err instanceof Error ? err.message : "Request failed.",
+            verdict: "broke",
+            reason: "",
+            suggestion: "",
+            errored: true,
+          },
+        ]);
+      }
+    }
+
+    setActiveIndex(-1);
+    setRunning(false);
+    setDone(true);
   };
 
   /** Reset to the start screen — mirrors the reference's renderArena(),
@@ -103,12 +149,14 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
   const reset = () => {
     setRunning(false);
     setDone(false);
+    setAttacks([]);
+    setActiveIndex(-1);
     setResults([]);
     setNotConfigured(false);
     setRunError(null);
   };
 
-  const broken = results.filter((r) => r.verdict === "broke");
+  const broken = results.filter((r) => r.verdict === "broke" && !r.errored);
 
   return (
     <div className="mx-auto max-w-[1240px] px-6 py-16">
@@ -129,7 +177,7 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
           </div>
           <div className="arena-score">
             {heldCount}
-            <span>held / {results.length || 5}</span>
+            <span>held / {attacks.length || 5}</span>
           </div>
         </div>
 
@@ -146,32 +194,44 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
         )}
 
         <div className="arena-progress">
-          {(results.length > 0
-            ? results
-            : Array.from<AttackResult | undefined>({ length: running ? 5 : 0 })
-          ).map((r, i) => {
-            const cls = r ? (r.verdict === "held" ? " held" : " broke") : " active";
+          {attacks.map((_, i) => {
+            const r = results[i];
+            const cls = r ? (r.verdict === "held" ? " held" : " broke") : i === activeIndex ? " active" : "";
             return <i key={i} className={cls.trim()} />;
           })}
         </div>
 
         <div ref={logRef} className="arena-log" style={{ maxHeight: 440, overflowY: "auto" }}>
-          {results.map((r) => (
-            <div key={r.index} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div className="chat-bubble attacker">
-                <div className="attacker-tag">⚠ {prettyCategory(r.category)}</div>
-                {r.prompt}
-              </div>
-              <div className="chat-bubble agent">
-                <div>{r.response}</div>
-                <div>
-                  <span className={`verdict-tag ${r.verdict === "held" ? "held" : "broke"}`}>
-                    {r.verdict === "held" ? "✓ HELD" : "✕ BROKE"}
-                  </span>
+          {attacks.map((a, i) => {
+            const r = results[i];
+            if (!r && i !== activeIndex) return null; // not reached yet — stays hidden until it's live
+            return (
+              <div key={i} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="chat-bubble attacker">
+                  <div className="attacker-tag">⚠ {prettyCategory(a.category)}</div>
+                  {a.prompt}
                 </div>
+                {r ? (
+                  <div className="chat-bubble agent">
+                    <div>{r.response}</div>
+                    <div>
+                      <span className={`verdict-tag ${!r.errored && r.verdict === "held" ? "held" : "broke"}`}>
+                        {r.errored ? "⚠ ERROR" : r.verdict === "held" ? "✓ HELD" : "✕ BROKE"}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="chat-bubble agent">
+                    <div className="chat-typing">
+                      <i />
+                      <i />
+                      <i />
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {!running && !finished && (
@@ -182,11 +242,10 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
           </div>
         )}
 
-        {running && (
+        {running && attacks.length === 0 && (
           <div className="arena-start">
             <p className="font-mono text-[11px] text-mute">
-              ⏳ Redcap is attacking and judging — 5 tailored prompts, each sent to the real agent and
-              judged for real. Usually well under a minute.
+              ⏳ Redcap is generating 5 tailored attacks…
             </p>
           </div>
         )}
@@ -194,7 +253,7 @@ export default function ArenaScreen({ agentId }: { agentId: string }) {
         {finished && (
           <div className={`arena-summary ${win ? "win" : "loss"}`}>
             <div className="arena-summary-score" style={{ color: win ? "var(--spring, var(--color-spring))" : "var(--rose, var(--color-rose))" }}>
-              {heldCount}/{results.length}
+              {heldCount}/{attacks.length}
             </div>
             <h3>{win ? "Your agent held the line 🛡️" : "A few cracks in the armor"}</h3>
             <p>

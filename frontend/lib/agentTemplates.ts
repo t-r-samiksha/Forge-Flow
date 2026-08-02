@@ -40,3 +40,18 @@ export function getTemplate(id: string | undefined): AgentDraft | undefined {
   const preset = AGENT_TEMPLATES[id];
   return preset ? { ...preset, knowledge: { ...preset.knowledge! }, tools: [...(preset.tools ?? [])] } : undefined;
 }
+
+/** Which optional Levels a template structurally implies, independent of
+ * field values (§2d: a template's field values are placeholder hints only,
+ * never filled defaults — this is a separate, structural default: which
+ * Levels/missions are visible in the Build Map, not what's typed into them).
+ * Retriever implies Memory; Tool-Using Agent implies Tools. A blank build
+ * (no templateId) gets neither, unchanged. */
+export const TEMPLATE_LEVEL_DEFAULTS: Record<string, { wantsKnowledge?: boolean; wantsTools?: boolean }> = {
+  retriever: { wantsKnowledge: true },
+  "tool-agent": { wantsTools: true },
+};
+
+export function getTemplateLevelDefaults(id: string | undefined): { wantsKnowledge?: boolean; wantsTools?: boolean } {
+  return (id && TEMPLATE_LEVEL_DEFAULTS[id]) || {};
+}

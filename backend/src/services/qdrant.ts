@@ -30,8 +30,12 @@ export function collectionName(agentId: string): string {
   return `agent_${agentId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-export async function ensureCollection(agentId: string): Promise<void> {
-  const name = collectionName(agentId);
+/** Shared real implementation, parameterized on an already-resolved
+ * collection name — collectionName(agentId) for per-agent knowledge,
+ * or the fixed FORGEFLOW_DOCS_COLLECTION for Nova's own docs (§8). Every
+ * agent-keyed export below is a thin wrapper over these, so there is
+ * exactly one real ensure/upsert/search implementation, not two. */
+async function ensureCollectionNamed(name: string): Promise<void> {
   const exists = await getClient().collectionExists(name);
   if (!exists.exists) {
     await getClient().createCollection(name, {
@@ -48,6 +52,10 @@ export async function ensureCollection(agentId: string): Promise<void> {
   });
 }
 
+export async function ensureCollection(agentId: string): Promise<void> {
+  await ensureCollectionNamed(collectionName(agentId));
+}
+
 export interface ChunkToUpsert {
   id?: string;
   vector: number[];
@@ -57,10 +65,10 @@ export interface ChunkToUpsert {
   chunkIndex: number;
 }
 
-export async function upsertChunks(agentId: string, chunks: ChunkToUpsert[]): Promise<void> {
+async function upsertChunksNamed(name: string, chunks: ChunkToUpsert[]): Promise<void> {
   if (chunks.length === 0) return;
-  await ensureCollection(agentId);
-  await getClient().upsert(collectionName(agentId), {
+  await ensureCollectionNamed(name);
+  await getClient().upsert(name, {
     wait: true,
     points: chunks.map((chunk) => ({
       id: chunk.id ?? uuidv4(),
@@ -75,6 +83,10 @@ export async function upsertChunks(agentId: string, chunks: ChunkToUpsert[]): Pr
   });
 }
 
+export async function upsertChunks(agentId: string, chunks: ChunkToUpsert[]): Promise<void> {
+  await upsertChunksNamed(collectionName(agentId), chunks);
+}
+
 export interface SearchResultChunk {
   text: string;
   docId: string;
@@ -83,12 +95,7 @@ export interface SearchResultChunk {
   score: number;
 }
 
-export async function search(
-  agentId: string,
-  queryVector: number[],
-  topK = 5
-): Promise<SearchResultChunk[]> {
-  const name = collectionName(agentId);
+async function searchNamed(name: string, queryVector: number[], topK = 5): Promise<SearchResultChunk[]> {
   const exists = await getClient().collectionExists(name);
   if (!exists.exists) return [];
 
@@ -108,6 +115,43 @@ export async function search(
       score: r.score,
     };
   });
+}
+
+export async function search(
+  agentId: string,
+  queryVector: number[],
+  topK = 5
+): Promise<SearchResultChunk[]> {
+  return searchNamed(collectionName(agentId), queryVector, topK);
+}
+
+/** Nova's own platform-doc collection (FORGEFLOW_V3_SPEC.md §8) — a fixed
+ * name instead of agent_<id>, real pipeline reused as-is via the *Named
+ * helpers above. Exported as a function (not a bare constant used
+ * directly by callers) so a negative-control test can point at a
+ * different/nonexistent name without touching real seeded data — see
+ * NOVA_DOCS_COLLECTION_OVERRIDE below. */
+const FORGEFLOW_DOCS_COLLECTION = "forgeflow_docs";
+function forgeflowDocsCollectionName(): string {
+  return process.env.NOVA_DOCS_COLLECTION_OVERRIDE || FORGEFLOW_DOCS_COLLECTION;
+}
+
+export async function ensureForgeflowDocsCollection(): Promise<void> {
+  await ensureCollectionNamed(forgeflowDocsCollectionName());
+}
+
+export async function upsertForgeflowDocsChunks(chunks: ChunkToUpsert[]): Promise<void> {
+  await upsertChunksNamed(forgeflowDocsCollectionName(), chunks);
+}
+
+export async function searchForgeflowDocs(queryVector: number[], topK = 5): Promise<SearchResultChunk[]> {
+  return searchNamed(forgeflowDocsCollectionName(), queryVector, topK);
+}
+
+export async function deleteForgeflowDocsCollection(): Promise<void> {
+  const name = forgeflowDocsCollectionName();
+  const exists = await getClient().collectionExists(name);
+  if (exists.exists) await getClient().deleteCollection(name);
 }
 
 export async function deleteDocChunks(agentId: string, docId: string): Promise<void> {

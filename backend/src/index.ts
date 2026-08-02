@@ -14,6 +14,7 @@ import authRoutes from "./routes/auth";
 import knowledgeRoutes from "./routes/knowledge";
 import toolRoutes from "./routes/tools";
 import redteamRoutes from "./routes/redteam";
+import crewRoutes from "./routes/crew";
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/tools", toolRoutes);
 app.use("/api/redteam", redteamRoutes);
+app.use("/api/crew", crewRoutes);
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

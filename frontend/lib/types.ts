@@ -48,6 +48,21 @@ export interface AgentDraft {
   temperature: number;
   knowledge?: AgentKnowledgeDraft;
   tools?: ToolDef[];
+  /** The one in-progress, not-yet-attached tool being typed directly into
+   * tool_handler.py's inline slots (FIX 2) — mirrors how every other field
+   * here is a real scalar the code panel binds to two-way, not a separate
+   * form's local state. Cleared back to the weather preset after a
+   * successful "+ attach tool". */
+  toolDraftKind?: "weather" | "webhook";
+  toolDraftName?: string;
+  toolDraftDescription?: string;
+  toolDraftEndpoint?: string;
+  /** Comma-separated `key:type` pairs, e.g. "city:string, count:number" —
+   * the simplest real inline-text representation of a param schema that
+   * still round-trips into the same Record<string, ParamType> shape the
+   * backend expects, without needing a second nested repeating-row editor
+   * inside the tool-row editor. */
+  toolDraftParams?: string;
 }
 
 export function providerForModel(model: string): string {
@@ -74,5 +89,24 @@ export function blankDraft(): AgentDraft {
     temperature: 0.3,
     knowledge: { topK: 4 },
     tools: [],
+    ...blankToolDraft(),
+  };
+}
+
+/** Resets the in-progress tool-draft fields to the weather preset — used
+ * both for a brand-new AgentDraft and after a successful "+ attach tool"
+ * (FIX 2), so there's one definition of "what a fresh tool draft looks
+ * like", not two. */
+export function blankToolDraft(): Pick<
+  AgentDraft,
+  "toolDraftKind" | "toolDraftName" | "toolDraftDescription" | "toolDraftEndpoint" | "toolDraftParams"
+> {
+  const preset = weatherToolPreset();
+  return {
+    toolDraftKind: "weather",
+    toolDraftName: preset.name,
+    toolDraftDescription: preset.description,
+    toolDraftEndpoint: preset.endpointUrl,
+    toolDraftParams: "city:string",
   };
 }

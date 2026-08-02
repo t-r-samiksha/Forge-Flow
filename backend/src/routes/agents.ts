@@ -2,7 +2,8 @@ import { Router, type Request, type Response } from "express";
 import { db } from "../db";
 import { createLyzrAgent, LyzrConfigError } from "../services/lyzr";
 import { calcForgeScore } from "../services/forgeScoring";
-import { copyToolDefs, toolContractForAgent } from "./tools";
+import { copyToolDefs, toolContractForAgent, getToolRows, rowsToInputs } from "./tools";
+import { validateToolDef } from "../services/tools";
 
 const router = Router();
 
@@ -82,12 +83,32 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
 
     // Re-forge mints a new Lyzr agent_id — carry the tool contract into
     // the new instructions and re-key tool_defs onto the new id, so a
-    // tool-equipped agent stays tool-equipped after an edit.
+    // tool-equipped agent stays tool-equipped after an edit. Reading
+    // tool_defs here also picks up any tool registered post-ship via
+    // POST /api/tools/:agentId since the last forge, not just ones
+    // attached at original creation.
+    const toolRows = getToolRows(row.lyzr_agent_id);
+    const toolInputs = rowsToInputs(toolRows);
+
+    // Real backend-side gate (row 7b) — a tool could have reached tool_defs
+    // via the weaker POST /api/tools/:agentId registration path since the
+    // last forge; re-forge is what actually bakes its contract into a
+    // fresh agent's instructions, so this is where an invalid one must be
+    // caught rather than shipped forward. Reject the whole re-forge,
+    // matching this route's own required-field validation above.
+    const toolProblems = toolInputs
+      .map((t) => ({ toolName: t.toolName || "(unnamed)", errors: validateToolDef(t) }))
+      .filter((p) => p.errors.length > 0);
+    if (toolProblems.length > 0) {
+      return res.status(400).json({ error: "Invalid tool configuration", toolErrors: toolProblems });
+    }
+
     const toolContract = toolContractForAgent(row.lyzr_agent_id);
+    const instructionsWithToolContract = instructions + toolContract;
 
     const { agentId: newLyzrId, payload } = await createLyzrAgent({
       name: row.name,
-      instructions: instructions + toolContract,
+      instructions: instructionsWithToolContract,
       model,
       temperature: Number(temperature),
     });
@@ -100,6 +121,12 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
         temperature: Number(temperature),
         model,
         ...(isNaN(topKRaw) ? {} : { topK: topKRaw }),
+        tools: toolInputs.map((t) => ({
+          toolName: t.toolName,
+          description: t.description,
+          endpointUrl: t.endpointUrl,
+        })),
+        instructionsWithToolContract,
       },
       row.forge_time,
       Number(estimateMin) || 22

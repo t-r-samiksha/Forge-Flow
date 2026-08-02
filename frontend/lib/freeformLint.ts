@@ -17,7 +17,17 @@ export type FieldKey =
   | "model"
   | "temperature"
   | "topK"
-  | "collection";
+  | "collection"
+  | "toolDraftName"
+  | "toolDraftDescription"
+  | "toolDraftEndpoint"
+  | "crewRoleLabel";
+
+/** The three states an inline code-editor slot can render as — moved here
+ * (rather than living only in CodePanel.tsx) so freeformCode.ts's segment
+ * generators can compute a slot's state from the same lint this type
+ * describes, without components/ reaching back into lib/. */
+export type SlotState = "ok" | "warn" | "empty";
 
 export interface ValidationLine {
   field: FieldKey;
@@ -135,6 +145,54 @@ export function lintField(field: FieldKey, ctx: LintCtx): ValidationLine {
       // rather than inviting a fictional name (the §5b lesson).
       return ok("collection", "collection binds to <b>agent_&lt;id&gt;</b>, created for this agent on ship");
     }
+    // The next three mirror backend/src/services/tools.ts's validateToolDef
+    // exactly (same min description length, same name regex, same builtin/
+    // http(s) endpoint check) — one real definition of "a valid tool" the
+    // client checks live, not a second one that could drift from what the
+    // backend actually enforces at /create and re-forge (§31).
+    case "toolDraftName": {
+      const v = (draft.toolDraftName ?? "").trim();
+      if (!v) return warn("toolDraftName", "tool name is empty — it's what the model emits in TOOL_CALL", true);
+      if (!/^[a-zA-Z0-9_]+$/.test(v))
+        return warn("toolDraftName", "must be snake_case — letters, digits, underscore only", true);
+      if ((draft.tools ?? []).some((t) => t.name === v))
+        return warn("toolDraftName", `a tool named "${esc(v)}" is already attached`, true);
+      return ok("toolDraftName", `tool name set &rarr; <b>${esc(v)}</b>`);
+    }
+    case "toolDraftDescription": {
+      const v = (draft.toolDraftDescription ?? "").trim();
+      if (v.length < 8)
+        return warn(
+          "toolDraftDescription",
+          "description must be at least 8 characters — the router picks tools from this text",
+          true
+        );
+      return ok("toolDraftDescription", `description accepted &rarr; <b>${v.length} chars</b>`);
+    }
+    case "toolDraftEndpoint": {
+      const v = (draft.toolDraftEndpoint ?? "").trim();
+      if (draft.toolDraftKind === "weather") {
+        return ok("toolDraftEndpoint", "endpoint &rarr; <b>builtin:weather</b> (keyless, real)");
+      }
+      let validUrl = false;
+      try {
+        const u = new URL(v);
+        validUrl = u.protocol === "http:" || u.protocol === "https:";
+      } catch {
+        validUrl = false;
+      }
+      if (!validUrl)
+        return warn("toolDraftEndpoint", "endpoint must be a well-formed http:// or https:// URL", true);
+      return ok("toolDraftEndpoint", `endpoint set &rarr; <b>${esc(v)}</b>`);
+    }
+    case "crewRoleLabel": {
+      // Role labels live in CrewBuildScreen's own string[] state, not
+      // AgentDraft, so this generic draft-shaped case is never actually
+      // consulted — crewDefineSegments computes each row's real state
+      // itself (same override pattern FIX 2 uses for repeating tool
+      // rows). Kept only so this switch stays exhaustive over FieldKey.
+      return ok("crewRoleLabel", "role label set");
+    }
   }
 }
 
@@ -145,6 +203,8 @@ export const MISSION_FIELDS: Record<string, FieldKey[]> = {
   instructions: ["instructions"],
   model: ["model", "temperature"],
   retrieval: ["topK", "collection"],
+  toolDefine: ["toolDraftName", "toolDraftDescription"],
+  toolWire: ["toolDraftEndpoint"],
 };
 
 export function lintMission(missionKey: string, ctx: LintCtx): ValidationLine[] {

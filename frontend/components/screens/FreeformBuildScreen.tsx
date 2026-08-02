@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -10,15 +10,8 @@ import {
   type ApiForgedAgent,
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
-import { getTemplate } from "@/lib/agentTemplates";
-import {
-  blankDraft,
-  weatherToolPreset,
-  BUILTIN_WEATHER,
-  type AgentDraft,
-  type ParamType,
-  type ToolDef,
-} from "@/lib/types";
+import { getTemplate, getTemplateLevelDefaults } from "@/lib/agentTemplates";
+import { blankDraft, type AgentDraft } from "@/lib/types";
 import {
   activeMissions,
   activeLevels,
@@ -36,7 +29,7 @@ import { lintField, fieldOwnerMission, type FieldKey, type LintCtx } from "@/lib
 import { buildFreeformBlueprint, blueprintLiveState } from "@/lib/freeformBlueprint";
 import { showToast } from "@/lib/effects";
 import { useGameStore } from "@/lib/store";
-import CodePanel, { type FileName, type SlotState } from "@/components/freeform/CodePanel";
+import CodePanel, { type FileName, type SlotState, type CodeExtraFile } from "@/components/freeform/CodePanel";
 import KnowledgeUploadForm from "@/components/knowledge/KnowledgeUploadForm";
 import TestConsole from "@/components/hub/TestConsole";
 import MissionIntro from "@/components/build/MissionIntro";
@@ -90,9 +83,47 @@ interface FreeformSnapshot {
 }
 const FREEFORM_SNAPSHOT_KEY = "__freeform";
 
-export default function FreeformBuildScreen({ templateId }: { templateId?: string }) {
+export default function FreeformBuildScreen({
+  templateId,
+  onShipped,
+  crewNext,
+  initialRoleHint,
+  crewRoles,
+  extraCodeFiles,
+  onBack,
+}: {
+  templateId?: string;
+  /** Multi-Agent Crew only (Phase 5, FORGEFLOW_V3_SPEC.md §6) — fired the
+   * instant ship() succeeds, so the crew flow can capture the real
+   * agent_id immediately rather than waiting for the developer to click
+   * through the post-ship hub. */
+  onShipped?: (agent: ApiForgedAgent) => void;
+  /** Crew only — when present, replaces "+ Ship another agent" (both on
+   * the Ship hub and after Upload's "Finish build") with this label/action,
+   * since "ship another agent" is the wrong affordance mid-crew-build. */
+  crewNext?: { label: string; onContinue: () => void };
+  /** Crew only — pre-seeds the Identity mission's role field as a
+   * placeholder hint (never a filled default, same §2d rule templates
+   * follow) from the crew's Level-1 role label for this sub-agent. */
+  initialRoleHint?: string;
+  /** Crew orchestrator only — real role labels of this crew's
+   * already-shipped sub-agents, sent straight through to POST
+   * /api/agent/create so the backend bakes the real ROUTE_TO contract. */
+  crewRoles?: string[];
+  /** Crew orchestrator only — real generated crew_config.py/orchestrator.py
+   * shown as extra CodePanel tabs. */
+  extraCodeFiles?: CodeExtraFile[];
+  /** Crew only — overrides the "← back to ForgeFlow" navigation, since
+   * within a crew build that link would silently abandon the whole crew. */
+  onBack?: () => void;
+}) {
   const router = useRouter();
   const addXp = useGameStore((s) => s.addXp);
+  // Crew sub-agent/orchestrator builds are embedded inside CrewBuildScreen,
+  // not a standalone `/build/new` visit — they must not participate in the
+  // single-slot freeform resume/autosave mechanism (§2g), which assumes
+  // exactly one in-progress freeform build at a time.
+  const crewMode = !!(onShipped || crewNext);
 
   // A cloned template is a starting *hint*, not a filled-in default (§3b).
   // The draft begins blank so every field reads as "fill me"; the template's
@@ -113,10 +144,19 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
         temperature: String(template.temperature),
         topK: String(template.knowledge?.topK ?? 4),
       }
-    : null;
-  const [wantsKnowledge, setWantsKnowledge] = useState(false);
+    : initialRoleHint
+      ? { role: initialRoleHint }
+      : null;
+  // Structural Level defaults implied by the chosen template — which
+  // Levels are visible in the Build Map, not what's typed into them (§2d
+  // still governs field values separately, via `hints` above).
+  const [wantsKnowledge, setWantsKnowledge] = useState(
+    () => !!getTemplateLevelDefaults(templateId).wantsKnowledge
+  );
   const [wantsTools, setWantsTools] = useState(
-    () => (getTemplate(templateId)?.tools?.length ?? 0) > 0
+    () =>
+      (getTemplate(templateId)?.tools?.length ?? 0) > 0 ||
+      !!getTemplateLevelDefaults(templateId).wantsTools
   );
   const [completed, setCompleted] = useState<Set<MissionKey>>(new Set());
   const [current, setCurrent] = useState<MissionKey>("identity");
@@ -189,7 +229,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   // action, so it skips the resume check entirely rather than silently
   // discarding or fighting over a different in-progress draft.
   useEffect(() => {
-    if (templateId) {
+    if (templateId || crewMode) {
       setResumeChecked(true);
       return;
     }
@@ -227,38 +267,69 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Builds the exact snapshot + saveProgress payload from whatever's
+   * currently live — shared by the debounced path below and the
+   * immediate unload-flush path, so there's exactly one definition of
+   * "what gets saved," not two that could drift apart. */
+  const buildAutosavePayload = () => {
+    const s = liveStateRef.current;
+    const snap: FreeformSnapshot = {
+      draft: s.draft,
+      rawTemp: s.rawTemp,
+      rawTopK: s.rawTopK,
+      current: s.current,
+      completed: Array.from(s.completed),
+      wantsKnowledge: s.wantsKnowledge,
+      wantsTools: s.wantsTools,
+      startedLevels: Array.from(s.startedLevels),
+      startedAt: startedAt.current,
+      xpEarnedSoFar: xpEarnedRef.current,
+    };
+    return {
+      activeCampaignId: "freeform" as const,
+      currentMissionIndex: 0,
+      slotValues: { [FREEFORM_SNAPSHOT_KEY]: JSON.stringify(snap) },
+      buildTimerSeconds: 0,
+    };
+  };
+
   /** Debounced, backend-persisted autosave — fires on every field edit and
    * at mission-navigation checkpoints, matching how the campaign build
    * flow autosaves on every slot fill. No-ops once shipped: `ship()`
    * already clears this same record server-side (see backend agent.ts),
    * so there is nothing left to resume into. */
   const scheduleAutosave = () => {
-    if (createdRef.current) return;
+    if (createdRef.current || crewMode) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      const s = liveStateRef.current;
-      const snap: FreeformSnapshot = {
-        draft: s.draft,
-        rawTemp: s.rawTemp,
-        rawTopK: s.rawTopK,
-        current: s.current,
-        completed: Array.from(s.completed),
-        wantsKnowledge: s.wantsKnowledge,
-        wantsTools: s.wantsTools,
-        startedLevels: Array.from(s.startedLevels),
-        startedAt: startedAt.current,
-        xpEarnedSoFar: xpEarnedRef.current,
-      };
-      saveProgress(getUserId(), {
-        activeCampaignId: "freeform",
-        currentMissionIndex: 0,
-        slotValues: { [FREEFORM_SNAPSHOT_KEY]: JSON.stringify(snap) },
-        buildTimerSeconds: 0,
-      }).catch(() => {
+      saveProgress(getUserId(), buildAutosavePayload()).catch(() => {
         /* non-blocking — worst case this edit isn't resumable, nothing else breaks */
       });
     }, 900);
   };
+
+  // A real close/refresh mid-edit races the 900ms debounce above — if the
+  // tab closes before the timer fires, that edit is silently lost and the
+  // build looks like it never resumed (the actual bug behind the "resume
+  // doesn't work" report: it worked once autosave had already fired, but
+  // a quick close right after typing beat the debounce every time). This
+  // flushes whatever's live immediately on pagehide, via a keepalive
+  // fetch so the browser finishes sending it even as the page unloads.
+  useEffect(() => {
+    if (crewMode) return;
+    const flush = () => {
+      if (createdRef.current) return;
+      clearTimeout(saveTimer.current);
+      saveProgress(getUserId(), buildAutosavePayload(), { keepalive: true }).catch(() => {});
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crewMode]);
 
   // Ship is gated on the same lint as every field-bearing mission.
   const canShip = shipBlockingCount(missions, ctx) === 0 && !created;
@@ -375,6 +446,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
           paramsSchema: t.paramsSchema,
           endpointUrl: t.endpointUrl,
         })),
+        crewRoles,
       });
       setCreated(result);
       createdRef.current = result;
@@ -382,6 +454,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
       showToast("🚀", "Agent shipped — a real Lyzr agent is live.");
       // Ship is a real mission — award its XP now that the agent exists.
       awardMission(getMission("ship"));
+      onShipped?.(result);
       // Upload only becomes reachable once a real agent_id exists. If the
       // build included Knowledge, advance straight into it (force past the
       // lock, since `created` state hasn't flushed this tick).
@@ -427,9 +500,13 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   const missionIdxInLevel = levelGroup.missions.findIndex((m) => m.key === current);
   const levelXP = levelGroup.missions.reduce((s, m) => s + m.reward, 0);
 
-  const backLink = (
+  // Embedded in a Crew build (crewMode), CrewBuildScreen already renders
+  // its own persistent "← back to ForgeFlow" + "Multi-Agent Crew build"
+  // header around this whole component — render nothing here instead of
+  // stacking a second, redundant one on top of it.
+  const backLink = crewMode ? null : (
     <div className="mx-auto max-w-[720px] px-6 pt-10">
-      <button type="button" className="back-link" onClick={() => router.push("/campaigns")}>
+      <button type="button" className="back-link" onClick={() => (onBack ? onBack() : router.push("/campaigns"))}>
         ← back to ForgeFlow
       </button>
     </div>
@@ -549,15 +626,20 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   const isLastMission = activeIndex === missions.length - 1;
 
   return (
-    <div className="mx-auto max-w-[1400px] px-6 py-10">
-      <div className="subnav">
-        <button type="button" className="back-link" onClick={() => router.push("/campaigns")}>
-          ← back to ForgeFlow
-        </button>
-        <span className="font-mono text-[11px] text-mute">
-          Freeform build{templateId ? ` · from "${templateId}" template` : ""}
-        </span>
-      </div>
+    <div className={crewMode ? "" : "mx-auto max-w-[1400px] px-6 py-10"}>
+      {/* Embedded in a Crew build, CrewBuildScreen's own header (and its
+          matching mx-auto max-w-[1400px] px-6 py-10 wrapper, above) already
+          covers this — rendering it again here just stacks a duplicate. */}
+      {!crewMode && (
+        <div className="subnav">
+          <button type="button" className="back-link" onClick={() => (onBack ? onBack() : router.push("/campaigns"))}>
+            ← back to ForgeFlow
+          </button>
+          <span className="font-mono text-[11px] text-mute">
+            Freeform build{templateId ? ` · from "${templateId}" template` : ""}
+          </span>
+        </div>
+      )}
 
       {/* minmax(0,1fr) on the center track lets it shrink below its wide
           code content instead of pushing the third (Live Agent) column off
@@ -578,42 +660,75 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
             sections={railSections}
             sticky={false}
           />
-          {(!wantsKnowledge || !wantsTools) && (
-            <div
-              className="rounded-2xl border border-line p-4"
-              style={{ background: "linear-gradient(180deg, var(--color-panel), var(--color-panel-2))" }}
-            >
-              <div className="mb-2 font-mono text-[9.5px] uppercase tracking-[.13em] text-mute">
-                Add optional missions
+          {(() => {
+            const memoryStarted = startedLevels.has("memory");
+            const toolsStarted = startedLevels.has("tools");
+            // Actionable = can still be added (not wanted yet) or removed
+            // (wanted, but its Level hasn't been started — nothing to lose).
+            const knowledgeActionable = !wantsKnowledge || !memoryStarted;
+            const toolsActionable = !wantsTools || !toolsStarted;
+            if (!knowledgeActionable && !toolsActionable) return null;
+            return (
+              <div
+                className="rounded-2xl border border-line p-4"
+                style={{ background: "linear-gradient(180deg, var(--color-panel), var(--color-panel-2))" }}
+              >
+                <div className="mb-2 font-mono text-[9.5px] uppercase tracking-[.13em] text-mute">
+                  Optional missions
+                </div>
+                <div className="flex flex-col gap-2">
+                  {!wantsKnowledge && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWantsKnowledge(true);
+                        goToMission("retrieval");
+                      }}
+                      className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-text transition-colors hover:border-violet hover:text-violet-hi"
+                    >
+                      📚 + Add Memory (knowledge)
+                    </button>
+                  )}
+                  {wantsKnowledge && !memoryStarted && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWantsKnowledge(false);
+                        if (levelForMission(current).id === "memory") goToMission("identity");
+                      }}
+                      className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-mute transition-colors hover:border-rose hover:text-rose"
+                    >
+                      📚 − Remove Memory (knowledge)
+                    </button>
+                  )}
+                  {!wantsTools && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWantsTools(true);
+                        goToMission("toolDefine");
+                      }}
+                      className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-text transition-colors hover:border-violet hover:text-violet-hi"
+                    >
+                      🔧 + Add Tools
+                    </button>
+                  )}
+                  {wantsTools && !toolsStarted && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWantsTools(false);
+                        if (levelForMission(current).id === "tools") goToMission("identity");
+                      }}
+                      className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-mute transition-colors hover:border-rose hover:text-rose"
+                    >
+                      🔧 − Remove Tools
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-col gap-2">
-                {!wantsKnowledge && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setWantsKnowledge(true);
-                      goToMission("retrieval");
-                    }}
-                    className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-text transition-colors hover:border-violet hover:text-violet-hi"
-                  >
-                    📚 + Add Memory (knowledge)
-                  </button>
-                )}
-                {!wantsTools && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setWantsTools(true);
-                      goToMission("toolDefine");
-                    }}
-                    className="rounded-lg border border-line px-3 py-2 text-left font-mono text-[11px] text-text transition-colors hover:border-violet hover:text-violet-hi"
-                  >
-                    🔧 + Add Tools
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* CENTER — Situation Report + editor + code + console */}
@@ -680,6 +795,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
               onGoToUpload={missions.some((m) => m.key === "upload") ? () => goToMission("upload") : undefined}
               missionsCompleted={completed.size}
               missionsTotal={missions.length}
+              crewNext={crewNext}
             />
           ) : current === "upload" ? (
             <UploadPhase
@@ -688,15 +804,10 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
               done={completed.has("upload")}
               onFinish={() => awardMission(getMission("upload"))}
               onShipAnother={shipAnother}
+              crewNext={crewNext}
             />
           ) : (
             <>
-              {isToolMission && (
-                <div className="mb-5">
-                  <ToolsEditor draft={draft} update={update} />
-                </div>
-              )}
-
               <CodePanel
                 draft={draft}
                 update={update}
@@ -708,6 +819,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
                 defaultFile={defaultFile}
                 hints={hints}
                 isFieldUnlocked={isFieldUnlocked}
+                extraFiles={extraCodeFiles}
               />
 
               <div className="mt-4 overflow-hidden rounded-xl border border-line">
@@ -769,248 +881,6 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   );
 }
 
-interface ParamRow {
-  key: string;
-  type: ParamType;
-}
-
-function ToolsEditor({
-  draft,
-  update,
-}: {
-  draft: AgentDraft;
-  update: (patch: Partial<AgentDraft>) => void;
-}) {
-  const tools = draft.tools ?? [];
-  const [kind, setKind] = useState<"weather" | "webhook">("weather");
-  const [name, setName] = useState("get_weather");
-  const [description, setDescription] = useState("Look up the current weather for a city");
-  const [endpointUrl, setEndpointUrl] = useState(BUILTIN_WEATHER);
-  const [params, setParams] = useState<ParamRow[]>([{ key: "city", type: "string" }]);
-  const [formError, setFormError] = useState<string | null>(null);
-
-  const applyKind = (k: "weather" | "webhook") => {
-    setKind(k);
-    setFormError(null);
-    if (k === "weather") {
-      const preset = weatherToolPreset();
-      setName(preset.name);
-      setDescription(preset.description);
-      setEndpointUrl(preset.endpointUrl);
-      setParams([{ key: "city", type: "string" }]);
-    } else {
-      setName("");
-      setDescription("");
-      setEndpointUrl("");
-      setParams([{ key: "", type: "string" }]);
-    }
-  };
-
-  const addTool = () => {
-    setFormError(null);
-    const cleanName = name.trim();
-    if (!/^[a-zA-Z0-9_]+$/.test(cleanName)) {
-      setFormError("Tool name must be a snake_case identifier (letters, digits, underscore).");
-      return;
-    }
-    if (tools.some((t) => t.name === cleanName)) {
-      setFormError(`A tool named "${cleanName}" is already attached.`);
-      return;
-    }
-    const url = endpointUrl.trim();
-    if (kind === "webhook" && !/^https?:\/\//.test(url)) {
-      setFormError("Webhook URL must start with http:// or https://.");
-      return;
-    }
-    const paramsSchema: Record<string, ParamType> = {};
-    for (const p of params) {
-      const k = p.key.trim();
-      if (!k) continue;
-      paramsSchema[k] = p.type;
-    }
-    const tool: ToolDef = {
-      name: cleanName,
-      description: description.trim(),
-      paramsSchema,
-      endpointUrl: kind === "weather" ? BUILTIN_WEATHER : url,
-    };
-    update({ tools: [...tools, tool] });
-    applyKind("weather");
-  };
-
-  const removeTool = (toolName: string) => {
-    update({ tools: tools.filter((t) => t.name !== toolName) });
-  };
-
-  return (
-    <div className="flex flex-col gap-5">
-      <h2 className="font-display text-lg font-semibold">Give it something real to call</h2>
-
-      {tools.length > 0 && (
-        <div className="flex flex-col gap-2">
-          {tools.map((t) => (
-            <div
-              key={t.name}
-              className="flex items-center justify-between gap-3 rounded-lg border border-line bg-code-bg px-3.5 py-2.5"
-            >
-              <div className="min-w-0">
-                <div className="truncate font-mono text-[12.5px] text-text">
-                  {t.name}
-                  <span className="ml-2 text-mute">
-                    {t.endpointUrl === BUILTIN_WEATHER ? "built-in" : "webhook"}
-                  </span>
-                </div>
-                <div className="truncate font-mono text-[10.5px] text-mute">
-                  {t.description || "—"} · params: {Object.keys(t.paramsSchema).join(", ") || "none"}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => removeTool(t.name)}
-                className="flex-none rounded-md border border-line px-2.5 py-1.5 font-mono text-[11px] text-rose transition-colors hover:border-rose"
-              >
-                🗑 Remove
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="rounded-xl border border-line p-4">
-        <div className="mb-3 flex gap-2 font-mono text-[11px]">
-          <button
-            type="button"
-            onClick={() => applyKind("weather")}
-            className={`rounded-full border px-3 py-1.5 transition-colors ${
-              kind === "weather"
-                ? "border-violet bg-[rgba(var(--color-violet-rgb)/.12)] text-violet-hi"
-                : "border-line text-mute hover:text-text"
-            }`}
-          >
-            🌦 Built-in: weather
-          </button>
-          <button
-            type="button"
-            onClick={() => applyKind("webhook")}
-            className={`rounded-full border px-3 py-1.5 transition-colors ${
-              kind === "webhook"
-                ? "border-violet bg-[rgba(var(--color-violet-rgb)/.12)] text-violet-hi"
-                : "border-line text-mute hover:text-text"
-            }`}
-          >
-            🔗 Custom webhook
-          </button>
-        </div>
-
-        {kind === "weather" && (
-          <p className="mb-3 font-mono text-[10.5px] leading-[1.6] text-mute">
-            Real, keyless — hits open-meteo&apos;s geocoding + forecast APIs. Fields below are
-            editable, but the endpoint stays the built-in weather handler.
-          </p>
-        )}
-
-        <div className="flex flex-col gap-3">
-          <div>
-            {fieldLabel("Tool name")}
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="get_weather"
-              className={inputCls}
-            />
-          </div>
-          <div>
-            {fieldLabel("Description")}
-            <input
-              type="text"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What the tool does and when to use it"
-              className={inputCls}
-            />
-            <p className="mt-1 font-mono text-[10px] text-mute">
-              The router picks tools from this text — be specific about when to call it.
-            </p>
-          </div>
-          {kind === "webhook" && (
-            <div>
-              {fieldLabel("Webhook URL")}
-              <input
-                type="text"
-                value={endpointUrl}
-                onChange={(e) => setEndpointUrl(e.target.value)}
-                placeholder="https://your-service.example.com/hook"
-                className={inputCls}
-              />
-              <p className="mt-1 font-mono text-[10px] text-mute">
-                Called with a real POST — the validated args become the JSON body.
-              </p>
-            </div>
-          )}
-
-          <div>
-            {fieldLabel("Parameters (key : type)")}
-            <div className="flex flex-col gap-2">
-              {params.map((p, i) => (
-                <div key={i} className="flex gap-2">
-                  <input
-                    type="text"
-                    value={p.key}
-                    onChange={(e) =>
-                      setParams((prev) => prev.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)))
-                    }
-                    placeholder="param name"
-                    className={`${inputCls} flex-1`}
-                  />
-                  <select
-                    value={p.type}
-                    onChange={(e) =>
-                      setParams((prev) =>
-                        prev.map((r, j) => (j === i ? { ...r, type: e.target.value as ParamType } : r))
-                      )
-                    }
-                    className="rounded-lg border border-line bg-code-bg px-2 py-2 font-mono text-[12px] text-text outline-none focus:border-violet"
-                  >
-                    <option value="string">string</option>
-                    <option value="number">number</option>
-                    <option value="boolean">boolean</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => setParams((prev) => prev.filter((_, j) => j !== i))}
-                    className="rounded-md border border-line px-2 font-mono text-[12px] text-mute hover:border-rose hover:text-rose"
-                    aria-label="remove parameter"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => setParams((prev) => [...prev, { key: "", type: "string" }])}
-              className="mt-2 rounded-md border border-line px-3 py-1.5 font-mono text-[11px] text-mute transition-colors hover:border-violet hover:text-violet-hi"
-            >
-              + parameter
-            </button>
-          </div>
-
-          {formError && <p className="font-mono text-[11.5px] text-rose">⚠ {formError}</p>}
-
-          <button
-            type="button"
-            onClick={addTool}
-            className="self-start rounded-lg bg-violet px-4 py-2 font-mono text-xs font-semibold text-on-accent transition-transform hover:scale-105"
-          >
-            + Attach tool
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** Level 4 · Upload Your Knowledge — the real post-ship upload flow. Reuses
  * the existing KnowledgeUploadForm (no new upload logic); it just lives in
  * this mission's slot now. Only ever rendered once `agent` exists. */
@@ -1020,12 +890,14 @@ function UploadPhase({
   done,
   onFinish,
   onShipAnother,
+  crewNext,
 }: {
   agent: ApiForgedAgent | null;
   sessionId: string;
   done: boolean;
   onFinish: () => void;
   onShipAnother: () => void;
+  crewNext?: { label: string; onContinue: () => void };
 }) {
   if (!agent) {
     return (
@@ -1055,13 +927,27 @@ function UploadPhase({
       {done ? (
         <div className="flex flex-wrap items-center gap-3">
           <span className="font-mono text-[11.5px] text-spring">✓ Build complete — every level done.</span>
-          <button
-            type="button"
-            onClick={onShipAnother}
-            className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
-          >
-            + Ship another agent
-          </button>
+          {crewNext ? (
+            <button
+              type="button"
+              onClick={crewNext.onContinue}
+              className="rounded-lg px-4 py-2 font-mono text-xs font-semibold text-on-accent transition-all hover:-translate-y-0.5"
+              style={{
+                background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+                boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+              }}
+            >
+              {crewNext.label}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onShipAnother}
+              className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
+            >
+              + Ship another agent
+            </button>
+          )}
         </div>
       ) : (
         <button
@@ -1092,6 +978,7 @@ function ShipPhase({
   onGoToUpload,
   missionsCompleted,
   missionsTotal,
+  crewNext,
 }: {
   draft: AgentDraft;
   created: ApiForgedAgent | null;
@@ -1108,6 +995,7 @@ function ShipPhase({
    * moment Ship renders (Ship itself is already counted as completed here). */
   missionsCompleted: number;
   missionsTotal: number;
+  crewNext?: { label: string; onContinue: () => void };
 }) {
   const missing = useMemo(() => {
     const items: string[] = [];
@@ -1170,13 +1058,27 @@ function ShipPhase({
               📚 Add knowledge →
             </button>
           )}
-          <button
-            type="button"
-            onClick={onShipAnother}
-            className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
-          >
-            + Ship another agent
-          </button>
+          {crewNext ? (
+            <button
+              type="button"
+              onClick={crewNext.onContinue}
+              className="rounded-lg px-4 py-2 font-mono text-xs font-semibold text-on-accent transition-all hover:-translate-y-0.5"
+              style={{
+                background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+                boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+              }}
+            >
+              {crewNext.label}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onShipAnother}
+              className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
+            >
+              + Ship another agent
+            </button>
+          )}
         </div>
       </div>
     );

@@ -115,6 +115,36 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
 
   useEffect(() => () => clearTimeout(autosaveTimer.current), []);
 
+  // Same real race FIX 4a found and fixed for the freeform builder: a
+  // quick close/refresh right after typing beats the 1200ms debounced
+  // checkpoint above, silently losing that edit. Flush the current slot
+  // values immediately on pagehide via a keepalive fetch so it survives
+  // the page unloading, same fix applied here for the legacy campaign
+  // build flow.
+  useEffect(() => {
+    const flush = () => {
+      clearTimeout(autosaveTimer.current);
+      const state = useGameStore.getState();
+      saveProgress(
+        getUserId(),
+        {
+          activeCampaignId: campaignId,
+          currentMissionIndex: missionIdx,
+          slotValues: state.slotValues,
+          buildTimerSeconds: state.timerSeconds,
+        },
+        { keepalive: true }
+      ).catch(() => {});
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaignId, missionIdx]);
+
   useEffect(() => {
     setShowIntro(true);
     setConsoleLines([]);

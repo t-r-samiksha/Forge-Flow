@@ -53,6 +53,11 @@ export interface CreateAgentPayload {
     paramsSchema: Record<string, string>;
     endpointUrl: string;
   }[];
+  /** Crew orchestrator only (Phase 5, FORGEFLOW_V3_SPEC.md §6) — the real
+   * role labels of this crew's already-shipped sub-agents. The backend
+   * bakes a ROUTE_TO contract into agent_instructions, same mechanism as
+   * TOOL_CALL. Never sent for a regular single-agent or sub-agent build. */
+  crewRoles?: string[];
 }
 
 export async function createAgent(
@@ -78,6 +83,50 @@ export async function chatWithAgent(
     body: JSON.stringify({ agentId, message, sessionId, userId }),
   });
   return handle<{ response: string; newAchievements: string[] }>(res);
+}
+
+/** Real Multi-Agent Crew (FORGEFLOW_V3_SPEC.md §6). Called from Level 4
+ * only, once every real agent_id it references already exists. */
+export async function createCrew(payload: {
+  userId: string;
+  orchestratorForgedAgentId: string;
+  name?: string;
+  members: { roleLabel: string; forgedAgentId: string }[];
+}): Promise<{ crewId: string }> {
+  const res = await fetch(`${API_URL}/api/crew/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handle<{ crewId: string }>(res);
+}
+
+export interface CrewInfo {
+  crew: { id: string; owner_user_id: string; orchestrator_agent_id: string; name: string | null };
+  members: { crew_id: string; forged_agent_id: string; role_label: string }[];
+}
+
+export async function getCrew(crewId: string): Promise<CrewInfo> {
+  const res = await fetch(`${API_URL}/api/crew/${crewId}`);
+  return handle<CrewInfo>(res);
+}
+
+/** The real routing chat loop — message goes to the real orchestrator,
+ * which may hand off to a real sub-agent (see backend/src/routes/crew.ts).
+ * `routedTo` is the real role label that answered, or null if the
+ * orchestrator answered directly — genuine metadata, not decorative. */
+export async function chatWithCrew(
+  crewId: string,
+  message: string,
+  sessionId: string,
+  userId?: string
+): Promise<{ response: string; routedTo: string | null; newAchievements: string[] }> {
+  const res = await fetch(`${API_URL}/api/crew/${crewId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, sessionId, userId }),
+  });
+  return handle<{ response: string; routedTo: string | null; newAchievements: string[] }>(res);
 }
 
 export interface PreviewAgentPayload {
@@ -116,21 +165,43 @@ export interface RedTeamResult {
   suggestion: string;
 }
 
-/** Real Red Team Arena pass (FORGEFLOW_V3_SPEC.md §7): Redcap generates 5
- * prompts tailored to the target agent's real role/instructions, each is
- * sent for real to the target, and Redcap judges each real response —
- * synchronous end to end, so this can take up to ~a minute for the 11
- * sequential real Lyzr calls it makes server-side. */
-export async function runRedTeam(
+export interface RedTeamAttack {
+  category: string;
+  prompt: string;
+}
+
+/** Real Red Team Arena, attack-generation half (FORGEFLOW_V3_SPEC.md §7,
+ * §25/§26): a single fast Redcap MODE:ATTACK call, tailored to the target
+ * agent's real role/instructions. Split from judging so the frontend can
+ * render all 5 attack cards immediately, then fill in verdicts one at a
+ * time via judgeRedTeam() as each real chat+judge round-trip resolves —
+ * restoring the old static-Arena's live, incremental feel. */
+export async function attackRedTeam(
   userId: string,
   agentId: string
-): Promise<{ results: RedTeamResult[]; agentVersion: number }> {
-  const res = await fetch(`${API_URL}/api/redteam/run/${agentId}`, {
+): Promise<{ prompts: RedTeamAttack[]; agentVersion: number }> {
+  const res = await fetch(`${API_URL}/api/redteam/attack/${agentId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId }),
   });
-  return handle<{ results: RedTeamResult[]; agentVersion: number }>(res);
+  return handle<{ prompts: RedTeamAttack[]; agentVersion: number }>(res);
+}
+
+/** One real prompt -> real target chat -> real Redcap judgment -> one
+ * stored, version-tagged row. Call once per attack, sequentially, to
+ * reproduce the old live per-attack update. */
+export async function judgeRedTeam(
+  userId: string,
+  agentId: string,
+  attack: RedTeamAttack
+): Promise<{ result: RedTeamResult; agentVersion: number; newAchievements: string[] }> {
+  const res = await fetch(`${API_URL}/api/redteam/judge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, agentId, prompt: attack.prompt, category: attack.category }),
+  });
+  return handle<{ result: RedTeamResult; agentVersion: number; newAchievements: string[] }>(res);
 }
 
 export interface RedTeamHistoryRow extends RedTeamResult {
@@ -173,12 +244,17 @@ export async function getProgress(userId: string): Promise<ProgressState> {
 
 export async function saveProgress(
   userId: string,
-  payload: Partial<Omit<ProgressState, "rank">>
+  payload: Partial<Omit<ProgressState, "rank">>,
+  /** keepalive: true lets this request survive the page unloading — used
+   * to flush a pending debounced autosave from a pagehide/beforeunload
+   * handler, where a normal fetch would otherwise be aborted mid-flight. */
+  opts?: { keepalive?: boolean }
 ): Promise<ProgressState & { newAchievements: string[] }> {
   const res = await fetch(`${API_URL}/api/progress/${userId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    keepalive: opts?.keepalive ?? false,
   });
   return handle<ProgressState & { newAchievements: string[] }>(res);
 }
@@ -206,12 +282,16 @@ export async function chatWithMentor(
   message: string,
   context: string,
   userId: string,
-  sessionId: string
+  sessionId: string,
+  /** Real internal forged_agents id — when set, the backend injects that
+   * agent's real config/forge-score into the turn on top of the platform
+   * doc grounding (FORGEFLOW_V3_SPEC.md §8). */
+  agentId?: string | null
 ): Promise<MentorChatResponse> {
   const res = await fetch(`${API_URL}/api/mentor/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, context, userId, sessionId }),
+    body: JSON.stringify({ message, context, userId, sessionId, agentId: agentId ?? undefined }),
   });
   return handle<MentorChatResponse>(res);
 }

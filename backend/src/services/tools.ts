@@ -28,6 +28,50 @@ export interface ToolDefRow {
 
 export const BUILTIN_WEATHER = "builtin:weather";
 
+/** Minimum real (non-trivial) description length — shared by request-time
+ * validation (below) and forge-score's scoreToolConfig (§29), so "valid"
+ * means the same thing in both places, not two parallel definitions. */
+export const MIN_TOOL_DESCRIPTION_LENGTH = 8;
+
+export function isValidToolName(name: string): boolean {
+  return /^[a-zA-Z0-9_]+$/.test(name);
+}
+
+export function isValidToolDescription(description: string): boolean {
+  return description.trim().length >= MIN_TOOL_DESCRIPTION_LENGTH;
+}
+
+/** A real endpoint: the keyless built-in weather sentinel, or a
+ * syntactically well-formed http(s) URL. Same check executeTool() will
+ * actually be able to call, not just "some non-empty string". */
+export function isValidToolEndpoint(url: string): boolean {
+  if (url === BUILTIN_WEATHER) return true;
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** Real per-tool validation — the same three checks scoreToolConfig (§29)
+ * scores a tool against, applied here as a hard gate at creation/re-forge
+ * time instead of just partial credit after the fact (§29's "known gap",
+ * row 7b). Returns one message per failed check, empty array if valid. */
+export function validateToolDef(t: ToolDefInput): string[] {
+  const errors: string[] = [];
+  if (!isValidToolName(t.toolName)) {
+    errors.push("toolName must be a non-empty snake_case identifier (letters, digits, underscore)");
+  }
+  if (!isValidToolDescription(t.description)) {
+    errors.push(`description must be a real, non-trivial description (at least ${MIN_TOOL_DESCRIPTION_LENGTH} characters)`);
+  }
+  if (!isValidToolEndpoint(t.endpointUrl)) {
+    errors.push(`endpointUrl must be "${BUILTIN_WEATHER}" or a well-formed http:// or https:// URL`);
+  }
+  return errors;
+}
+
 export interface ParsedToolCall {
   tool: string;
   args: Record<string, unknown>;
