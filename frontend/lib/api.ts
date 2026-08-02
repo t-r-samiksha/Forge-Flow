@@ -16,6 +16,10 @@ export interface ApiForgedAgent {
   version: number;
   forgedAt: string;
   lastEditedAt?: string;
+  /** Which freeform ?template=<id> this build started from — null for a
+   * genuine "Start from scratch" build or an agent shipped before this
+   * field existed (never guessed, FIX 1). */
+  templateId?: string | null;
 }
 
 async function handle<T>(res: Response): Promise<T> {
@@ -58,6 +62,12 @@ export interface CreateAgentPayload {
    * bakes a ROUTE_TO contract into agent_instructions, same mechanism as
    * TOOL_CALL. Never sent for a regular single-agent or sub-agent build. */
   crewRoles?: string[];
+  /** Which ?template=<id> this freeform build started from — omitted (or
+   * undefined) for "Start from scratch". Metadata only: does not change
+   * AgentDraft's shape, the Level/Mission skeleton, or generated code
+   * (§3b still holds — same skeleton regardless of template), just what
+   * FreeformAgentCard shows afterward (FIX 1). */
+  templateId?: string | null;
 }
 
 export async function createAgent(
@@ -219,6 +229,14 @@ export async function getRedTeamHistory(agentId: string): Promise<RedTeamHistory
 export async function getAgent(userId: string, agentId: string): Promise<ApiForgedAgent> {
   const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}`);
   return handle<ApiForgedAgent>(res);
+}
+
+/** Real deletion — real Lyzr DELETE, real forged_agents + dependent-row
+ * removal (row: new capability). Blocked server-side (409) if this agent
+ * is a real Crew member or orchestrator. */
+export async function deleteAgent(userId: string, agentId: string): Promise<{ deleted: true; id: string }> {
+  const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}`, { method: "DELETE" });
+  return handle<{ deleted: true; id: string }>(res);
 }
 
 export interface ProgressState {

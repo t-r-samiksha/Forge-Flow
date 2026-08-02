@@ -69,6 +69,26 @@ export async function createLyzrAgent(
   return { agentId: data.agent_id, payload };
 }
 
+/** Real DELETE /v3/agents/:id — used by DELETE /api/agents/:userId/:agentId
+ * (row: real agent deletion). A 404 from Lyzr (agent already gone, e.g. a
+ * prior failed retry) is treated as success — the end state is the same,
+ * nothing left to delete on Lyzr's side. Any other non-2xx is a real failure. */
+export async function deleteLyzrAgent(lyzrAgentId: string): Promise<void> {
+  const apiKey = requireApiKey();
+  const t0 = Date.now();
+  console.log(`[lyzr] -> DELETE ${LYZR_BASE}/agents/${lyzrAgentId}`);
+  const res = await fetch(`${LYZR_BASE}/agents/${lyzrAgentId}`, {
+    method: "DELETE",
+    headers: { "x-api-key": apiKey },
+  });
+  if (!res.ok && res.status !== 404) {
+    const text = await res.text().catch(() => "");
+    console.log(`[lyzr] <- ${res.status} in ${Date.now() - t0}ms — FAILED: ${text}`);
+    throw new Error(`Lyzr delete agent failed (${res.status}): ${text}`);
+  }
+  console.log(`[lyzr] <- ${res.status} in ${Date.now() - t0}ms — deleted agentId=${lyzrAgentId}`);
+}
+
 function requireMentorAgentId(): string {
   const agentId = process.env.LYZR_MENTOR_AGENT_ID;
   if (!agentId) {

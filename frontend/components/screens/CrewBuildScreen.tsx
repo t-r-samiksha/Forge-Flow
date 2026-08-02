@@ -130,6 +130,14 @@ export default function CrewBuildScreen() {
   const [resumeChecked, setResumeChecked] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const deployedRef = useRef(false); // mirrors crewId synchronously — same stale-closure guard §23 uses
+  // True only between "a real edit scheduled a save" and "that save went
+  // out" — without this, merely visiting /build/crew and closing without
+  // touching anything would flush a blank/unchanged snapshot on unload,
+  // and since saveProgress replaces the whole slotValues column (not just
+  // this build's own key), that would silently wipe out any freeform or
+  // template draft saved under a different key (found while fixing the
+  // same-class bug in the freeform flow).
+  const hasPendingEditRef = useRef(false);
 
   // Mirrors every render's latest state into a ref so the debounced
   // autosave (fired from a setTimeout) and the pagehide/beforeunload
@@ -240,19 +248,26 @@ export default function CrewBuildScreen() {
 
   const scheduleAutosave = () => {
     if (deployedRef.current) return;
+    hasPendingEditRef.current = true;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveProgress(getUserId(), buildSnapshotPayload()).catch(() => {});
+      saveProgress(getUserId(), buildSnapshotPayload())
+        .catch(() => {})
+        .finally(() => {
+          hasPendingEditRef.current = false;
+        });
     }, 900);
   };
 
   // Same real fix as FIX 4a: a quick close/refresh right after an edit
   // (e.g. right after a sub-agent ships) races the 900ms debounce — flush
   // immediately on pagehide via a keepalive fetch so it survives unload.
+  // Only if there's a genuinely real, unconfirmed edit — see hasPendingEditRef.
   useEffect(() => {
     const flush = () => {
-      if (deployedRef.current) return;
+      if (deployedRef.current || !hasPendingEditRef.current) return;
       clearTimeout(saveTimer.current);
+      hasPendingEditRef.current = false;
       saveProgress(getUserId(), buildSnapshotPayload(), { keepalive: true }).catch(() => {});
     };
     window.addEventListener("pagehide", flush);
@@ -285,6 +300,19 @@ export default function CrewBuildScreen() {
     scheduleAutosave();
   };
 
+  /** Back-navigation counterpart to goToLevel/startLevel, scoped ONLY to
+   * levelIdx 0 (Define the Crew) — the one level here that isn't a
+   * FreeformBuildScreen instance. Levels 1/2 embed FreeformBuildScreen keyed
+   * per sub-agent/orchestrator; navigating back INTO one of those after
+   * leaving it remounts it blank with no memory of already being shipped
+   * (§34's "deliberately not added" finding) — real risk of a duplicate
+   * Lyzr agent on re-ship. Never call this for levelIdx > 0. */
+  const goToLevelEditor = (idx: number) => {
+    setLevelIdx(idx);
+    setView("editor");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const railSteps = levels.map((l) => ({ label: l.title, sub: `${l.missions.length} mission${l.missions.length === 1 ? "" : "s"}` }));
   const railChecked = levels.map((_, i) => {
     if (i === 0) return crewDefined;
@@ -315,6 +343,12 @@ export default function CrewBuildScreen() {
   }
 
   if (view === "level") {
+    // Only Level 1's intro has a SAFE predecessor to return to (Level 0's
+    // own editor — not a FreeformBuildScreen instance). Level 0 is the true
+    // first page; Levels 2/3's predecessors are FreeformBuildScreen
+    // instances that would remount blank if re-entered (see goToLevelEditor
+    // above) — no back button for those, matching §34.
+    const onPrevLevel = levelIdx === 1 ? () => goToLevelEditor(0) : undefined;
     return (
       <div>
         {backLink}
@@ -329,12 +363,18 @@ export default function CrewBuildScreen() {
           rewardLabel="available"
           onBegin={startLevel}
           beginLabel="Start level →"
+          onPrev={onPrevLevel}
         />
       </div>
     );
   }
 
   if (view === "overview") {
+    // Safe only when this mission's own Level-intro is the real predecessor
+    // (Level 0's single mission, or Level 1's FIRST sub-agent) — a later
+    // sub-agent's overview would need to step back into an already-shipped
+    // FreeformBuildScreen instance, the same unsafe remount case as above.
+    const onPrevMission = levelIdx === 0 || (levelIdx === 1 && subAgentIdx === 0) ? () => setView("level") : undefined;
     return (
       <div>
         {backLink}
@@ -349,6 +389,7 @@ export default function CrewBuildScreen() {
           onBegin={() => setView("editor")}
           onBack={() => setView("editor")}
           beginLabel="Begin mission →"
+          onPrev={onPrevMission}
         />
       </div>
     );

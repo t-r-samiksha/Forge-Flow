@@ -1107,6 +1107,17 @@ h1.hero .accent {
   background: var(--panel-3, var(--color-panel-3));
   color: var(--text, var(--color-text));
 }
+.ccard-menu-item-danger {
+  color: var(--color-rose);
+}
+.ccard-menu-item-danger:hover {
+  background: rgba(var(--color-rose-rgb) / 0.12);
+  color: var(--color-rose);
+}
+.ccard-menu-item-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .ccard-actions {
   margin-top: 16px;
   display: grid;

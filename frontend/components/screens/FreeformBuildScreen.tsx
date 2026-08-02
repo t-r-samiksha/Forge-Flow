@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import { getTemplate, getTemplateLevelDefaults } from "@/lib/agentTemplates";
+import { getCampaign } from "@/lib/campaigns";
 import { blankDraft, type AgentDraft } from "@/lib/types";
 import {
   activeMissions,
@@ -80,6 +81,11 @@ interface FreeformSnapshot {
   startedLevels: LevelId[];
   startedAt: number;
   xpEarnedSoFar: number;
+  /** Which ?template=<id> (or null for "Start from scratch") this saved
+   * draft was started under — resume only offers a draft back when it
+   * matches the template currently being requested, so clicking "Retriever
+   * Agent" never silently resumes an in-progress Tool-Using Agent draft. */
+  templateId: string | null;
 }
 const FREEFORM_SNAPSHOT_KEY = "__freeform";
 
@@ -191,7 +197,22 @@ export default function FreeformBuildScreen({
   const consoleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const consoleId = useRef(0);
   const [resumeChecked, setResumeChecked] = useState(false);
+  // Real "table of contents" entry screen (FIX 1) — shown once, only on a
+  // genuinely fresh/unstarted build, listing every active Level by name
+  // before diving into Level 1's own mission breakdown (which is what the
+  // very first screen used to show directly). Gated on real progress being
+  // empty (not just this flag) so a resumed in-progress draft never sees
+  // it again, regardless of what this flag initializes to.
+  const [buildOverviewSeen, setBuildOverviewSeen] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // True only between "a real edit/navigation scheduled a save" and "that
+  // save actually went out" — the pagehide/beforeunload flush below checks
+  // this before writing anything. Without it, simply visiting the builder
+  // (e.g. a different template) and closing without ever touching a field
+  // would unconditionally flush a blank draft, silently clobbering a real
+  // in-progress draft already saved under the same __freeform slot for a
+  // different template (found while verifying real cross-template resume).
+  const hasPendingEditRef = useRef(false);
   // Mirrors `created` synchronously (setCreated itself is async and hasn't
   // flushed by the time ship() calls awardMission(), which schedules an
   // autosave of its own — without this, that stale-closure autosave would
@@ -225,20 +246,28 @@ export default function FreeformBuildScreen({
   liveStateRef.current = { draft, rawTemp, rawTopK, current, completed, wantsKnowledge, wantsTools, startedLevels };
 
   // ---- resume: one active freeform build at a time, same as campaigns ----
-  // A `?template=` entry is an explicit "start fresh from this template"
-  // action, so it skips the resume check entirely rather than silently
-  // discarding or fighting over a different in-progress draft.
+  // Real templates (?template=<id>) used to skip this check entirely,
+  // treating every template visit as "start fresh" — the actual reason
+  // resume looked like a freeform-only feature (row: fix). Now it checks
+  // for a saved draft the same way scratch always has, but only resumes
+  // it when the draft's own stored templateId matches what's being
+  // requested now — so clicking "Retriever Agent" while a Tool-Using
+  // Agent draft is saved still starts fresh rather than silently showing
+  // the wrong in-progress build. Crew sub-agents keep their own separate
+  // resume (CrewBuildScreen), unaffected.
   useEffect(() => {
-    if (templateId || crewMode) {
+    if (crewMode) {
       setResumeChecked(true);
       return;
     }
+    const requestedTemplateId = templateId ?? null;
     getProgress(getUserId())
       .then((progress) => {
         const raw = progress.activeCampaignId === "freeform" ? progress.slotValues[FREEFORM_SNAPSHOT_KEY] : undefined;
         if (raw) {
           try {
             const snap = JSON.parse(raw) as FreeformSnapshot;
+            if ((snap.templateId ?? null) !== requestedTemplateId) return;
             setDraft(snap.draft);
             setRawTemp(snap.rawTemp);
             setRawTopK(snap.rawTopK);
@@ -284,6 +313,7 @@ export default function FreeformBuildScreen({
       startedLevels: Array.from(s.startedLevels),
       startedAt: startedAt.current,
       xpEarnedSoFar: xpEarnedRef.current,
+      templateId: templateId ?? null,
     };
     return {
       activeCampaignId: "freeform" as const,
@@ -300,11 +330,16 @@ export default function FreeformBuildScreen({
    * so there is nothing left to resume into. */
   const scheduleAutosave = () => {
     if (createdRef.current || crewMode) return;
+    hasPendingEditRef.current = true;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveProgress(getUserId(), buildAutosavePayload()).catch(() => {
-        /* non-blocking — worst case this edit isn't resumable, nothing else breaks */
-      });
+      saveProgress(getUserId(), buildAutosavePayload())
+        .catch(() => {
+          /* non-blocking — worst case this edit isn't resumable, nothing else breaks */
+        })
+        .finally(() => {
+          hasPendingEditRef.current = false;
+        });
     }, 900);
   };
 
@@ -318,8 +353,9 @@ export default function FreeformBuildScreen({
   useEffect(() => {
     if (crewMode) return;
     const flush = () => {
-      if (createdRef.current) return;
+      if (createdRef.current || !hasPendingEditRef.current) return;
       clearTimeout(saveTimer.current);
+      hasPendingEditRef.current = false;
       saveProgress(getUserId(), buildAutosavePayload(), { keepalive: true }).catch(() => {});
     };
     window.addEventListener("pagehide", flush);
@@ -397,6 +433,19 @@ export default function FreeformBuildScreen({
     scheduleAutosave();
   };
 
+  /** Back-navigation counterpart to goToMission/startLevel/completeMission —
+   * jumps straight into a mission's editor (skipping its own overview
+   * screen, since going "back" into a mission means returning to where you
+   * left off working, not re-showing its recap). Used only for backward
+   * moves within this same component instance (never across a Crew
+   * sub-agent boundary — see §34's "deliberately not added" note). */
+  const goToMissionEditor = (key: MissionKey) => {
+    setCurrent(key);
+    setConsoleLog([]);
+    setView("editor");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const awardMission = (mission: FreeformMission) => {
     setCompleted((prev) => new Set(prev).add(mission.key));
     if (!xpAwarded.current.has(mission.key)) {
@@ -447,6 +496,7 @@ export default function FreeformBuildScreen({
           endpointUrl: t.endpointUrl,
         })),
         crewRoles,
+        templateId: templateId ?? null,
       });
       setCreated(result);
       createdRef.current = result;
@@ -523,9 +573,50 @@ export default function FreeformBuildScreen({
     );
   }
 
+  // ---- Build Overview (FIX 1) — the real first screen: what levels this
+  // build actually has, before Level 1's own intro. Never shown for a
+  // Crew sub-agent (CrewBuildScreen's own "Build Each Sub-Agent" mission
+  // already explains that framing) or once any real progress exists. ----
+  if (!crewMode && !buildOverviewSeen && startedLevels.size === 0 && completed.size === 0) {
+    const buildTitle = templateId ? (getCampaign(templateId)?.title ?? "Freeform Build") : "Freeform Build";
+    const totalXP = lvls.reduce((s, g) => s + g.missions.reduce((s2, m) => s2 + m.reward, 0), 0);
+    return (
+      <div>
+        {backLink}
+        <MissionIntro
+          missionNumber={1}
+          totalMissions={1}
+          kicker="Your build"
+          title={buildTitle}
+          descHtml={`This build has <b>${lvls.length} level${lvls.length === 1 ? "" : "s"}</b>. Each one ships real, working pieces of the agent — nothing here is simulated.`}
+          steps={lvls.map((g, i) => ({
+            label: `Level ${i + 1} — ${g.level.title}`,
+            sub: g.level.description,
+          }))}
+          reward={totalXP}
+          rewardLabel="available across the whole build"
+          onBegin={() => setBuildOverviewSeen(true)}
+          beginLabel="Start building →"
+        />
+      </div>
+    );
+  }
+
   // ---- Level-intro pre-screen (reuses MissionIntro; shown once per level
   //      before that level's first mission overview) ----
   if (view === "level") {
+    // Chain-symmetric back: Level 1's intro is preceded only by the Build
+    // Overview screen (re-shown by clearing the "seen" flag); every later
+    // level's intro is preceded by the previous level's LAST mission editor
+    // (mirroring how that mission's own Continue led here).
+    const onPrevLevel = crewMode
+      ? undefined
+      : levelNumber === 1
+        ? () => setBuildOverviewSeen(false)
+        : () => {
+            const prevGroup = lvls[levelNumber - 2]!;
+            goToMissionEditor(prevGroup.missions[prevGroup.missions.length - 1]!.key);
+          };
     return (
       <div>
         {backLink}
@@ -544,6 +635,7 @@ export default function FreeformBuildScreen({
           rewardLabel="available"
           onBegin={() => startLevel(currentLevel.id)}
           beginLabel="Start level →"
+          onPrev={onPrevLevel}
         />
       </div>
     );
@@ -551,6 +643,13 @@ export default function FreeformBuildScreen({
 
   // ---- mission-overview pre-screen ----
   if (view === "overview") {
+    // Chain-symmetric back: the first mission of a level is preceded by
+    // that level's own intro; any later mission is preceded by the
+    // PREVIOUS mission's editor (mirroring that mission's own Continue).
+    const onPrevMission =
+      missionIdxInLevel === 0
+        ? () => setView("level")
+        : () => goToMissionEditor(levelGroup.missions[missionIdxInLevel - 1]!.key);
     return (
       <div>
         {backLink}
@@ -565,6 +664,7 @@ export default function FreeformBuildScreen({
           onBegin={() => setView("editor")}
           onBack={() => setView("editor")}
           beginLabel="Begin mission →"
+          onPrev={onPrevMission}
         />
       </div>
     );
@@ -796,6 +896,7 @@ export default function FreeformBuildScreen({
               missionsCompleted={completed.size}
               missionsTotal={missions.length}
               crewNext={crewNext}
+              onBack={created ? undefined : () => setView("overview")}
             />
           ) : current === "upload" ? (
             <UploadPhase
@@ -805,6 +906,7 @@ export default function FreeformBuildScreen({
               onFinish={() => awardMission(getMission("upload"))}
               onShipAnother={shipAnother}
               crewNext={crewNext}
+              onBack={completed.has("upload") ? undefined : () => setView("overview")}
             />
           ) : (
             <>
@@ -836,26 +938,39 @@ export default function FreeformBuildScreen({
                     </>
                   )}
                 </span>
-                <button
-                  type="button"
-                  disabled={blocking > 0}
-                  onClick={() => completeMission(mission)}
-                  className={`rounded-[10px] px-[26px] py-3 text-sm font-semibold transition-all ${
-                    blocking === 0
-                      ? "cursor-pointer text-on-accent hover:-translate-y-0.5"
-                      : "cursor-not-allowed border border-line bg-panel-3 text-mute"
-                  }`}
-                  style={
-                    blocking === 0
-                      ? {
-                          background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
-                          boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
-                        }
-                      : undefined
-                  }
-                >
-                  {isLastMission ? "Finish →" : "Continue →"}
-                </button>
+                <div className="flex items-center gap-2.5">
+                  {/* Chain-symmetric: every mission's editor is preceded by
+                      that same mission's own overview screen, so Back always
+                      has somewhere real to go (unlike Continue, which is
+                      blocked on validation, not on being the first mission). */}
+                  <button
+                    type="button"
+                    onClick={() => setView("overview")}
+                    className="rounded-[10px] border border-line px-5 py-3 text-sm font-semibold text-dim transition-all hover:-translate-y-0.5 hover:border-violet hover:text-violet-hi"
+                  >
+                    ← Back
+                  </button>
+                  <button
+                    type="button"
+                    disabled={blocking > 0}
+                    onClick={() => completeMission(mission)}
+                    className={`rounded-[10px] px-[26px] py-3 text-sm font-semibold transition-all ${
+                      blocking === 0
+                        ? "cursor-pointer text-on-accent hover:-translate-y-0.5"
+                        : "cursor-not-allowed border border-line bg-panel-3 text-mute"
+                    }`}
+                    style={
+                      blocking === 0
+                        ? {
+                            background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+                            boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+                          }
+                        : undefined
+                    }
+                  >
+                    {isLastMission ? "Finish →" : "Continue →"}
+                  </button>
+                </div>
               </div>
             </>
           )}
@@ -891,6 +1006,7 @@ function UploadPhase({
   onFinish,
   onShipAnother,
   crewNext,
+  onBack,
 }: {
   agent: ApiForgedAgent | null;
   sessionId: string;
@@ -898,6 +1014,9 @@ function UploadPhase({
   onFinish: () => void;
   onShipAnother: () => void;
   crewNext?: { label: string; onContinue: () => void };
+  /** Back to Upload's own overview screen — undefined once the build is
+   * actually finished (nothing left to revise). */
+  onBack?: () => void;
 }) {
   if (!agent) {
     return (
@@ -925,42 +1044,69 @@ function UploadPhase({
       </div>
 
       {done ? (
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-col gap-4">
           <span className="font-mono text-[11.5px] text-spring">✓ Build complete — every level done.</span>
-          {crewNext ? (
-            <button
-              type="button"
-              onClick={crewNext.onContinue}
-              className="rounded-lg px-4 py-2 font-mono text-xs font-semibold text-on-accent transition-all hover:-translate-y-0.5"
-              style={{
-                background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
-                boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
-              }}
-            >
-              {crewNext.label}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={onShipAnother}
-              className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
-            >
-              + Ship another agent
-            </button>
-          )}
+
+          {/* Same real 5-link hub the Ship mission shows — this mission is
+              the actual last step whenever Knowledge is opted in, so the
+              hub had disappeared for anyone who reached Ship earlier and
+              navigated on into Upload (a real, reported gap: the hub only
+              ever lived on the Ship mission's own screen). */}
+          <div className="grid grid-cols-2 gap-3">
+            <HubLink href={`/agent/${agent.id}/doc`} icon="📄" label="View what you learned" />
+            <HubLink href={`/agent/${agent.id}/chat`} icon="💬" label="Talk to Agent" />
+            <HubLink href={`/agent/${agent.id}/arena`} icon="⚔️" label="Red Team Arena" />
+            <HubLink href={`/agent/${agent.id}/compare`} icon="🧬" label="Multiverse Compare" />
+            <HubLink href={`/agent/${agent.id}/certificate`} icon="🏅" label="Generate Forge Certificate" />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            {crewNext ? (
+              <button
+                type="button"
+                onClick={crewNext.onContinue}
+                className="rounded-lg px-4 py-2 font-mono text-xs font-semibold text-on-accent transition-all hover:-translate-y-0.5"
+                style={{
+                  background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+                  boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+                }}
+              >
+                {crewNext.label}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onShipAnother}
+                className="rounded-lg border border-line px-4 py-2 font-mono text-xs text-text transition-colors hover:border-violet hover:text-violet-hi"
+              >
+                + Ship another agent
+              </button>
+            )}
+          </div>
         </div>
       ) : (
-        <button
-          type="button"
-          onClick={onFinish}
-          className="self-start rounded-[10px] px-7 py-3 text-sm font-semibold text-on-accent transition-all hover:-translate-y-0.5"
-          style={{
-            background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
-            boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
-          }}
-        >
-          Finish build →
-        </button>
+        <div className="flex items-center gap-2.5">
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-[10px] border border-line px-5 py-3 text-sm font-semibold text-dim transition-all hover:-translate-y-0.5 hover:border-violet hover:text-violet-hi"
+            >
+              ← Back
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onFinish}
+            className="self-start rounded-[10px] px-7 py-3 text-sm font-semibold text-on-accent transition-all hover:-translate-y-0.5"
+            style={{
+              background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+              boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+            }}
+          >
+            Finish build →
+          </button>
+        </div>
       )}
     </div>
   );
@@ -979,6 +1125,7 @@ function ShipPhase({
   missionsCompleted,
   missionsTotal,
   crewNext,
+  onBack,
 }: {
   draft: AgentDraft;
   created: ApiForgedAgent | null;
@@ -995,6 +1142,9 @@ function ShipPhase({
    * moment Ship renders (Ship itself is already counted as completed here). */
   missionsCompleted: number;
   missionsTotal: number;
+  /** Back to the mission right before Ship — undefined once shipped (a real
+   * agent already exists, so there's nothing left to "go back" out of). */
+  onBack?: () => void;
   crewNext?: { label: string; onContinue: () => void };
 }) {
   const missing = useMemo(() => {
@@ -1033,11 +1183,14 @@ function ShipPhase({
         </div>
 
         {/* Knowledge upload now lives in its own Upload mission (Level 4),
-            reachable only after this agent_id exists. The four links below
+            reachable only after this agent_id exists. The five links below
             route to the same real screens a campaign ship already used —
             adapted (§ freeformAgentView.ts) to read this agent's real
-            config instead of a campaign's, not rebuilt. */}
+            config instead of a campaign's, not rebuilt. View was missing
+            here despite existing on both the campaign ship hub and the
+            /campaigns card grid — added for parity. */}
         <div className="grid grid-cols-2 gap-3">
+          <HubLink href={`/agent/${created.id}/doc`} icon="📄" label="View what you learned" />
           <HubLink href={`/agent/${created.id}/chat`} icon="💬" label="Talk to Agent" />
           <HubLink href={`/agent/${created.id}/arena`} icon="⚔️" label="Red Team Arena" />
           <HubLink href={`/agent/${created.id}/compare`} icon="🧬" label="Multiverse Compare" />
@@ -1110,18 +1263,30 @@ function ShipPhase({
       {notConfigured && <p className="font-mono text-[11.5px] text-amber">⚠ {shipError}</p>}
       {!notConfigured && shipError && <p className="font-mono text-[11.5px] text-rose">⚠ {shipError}</p>}
 
-      <button
-        type="button"
-        onClick={onShip}
-        disabled={!canShip || shipping}
-        className="self-start rounded-[10px] px-7 py-3 text-sm font-semibold text-on-accent transition-all hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
-        style={{
-          background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
-          boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
-        }}
-      >
-        {shipping ? "⏳ Shipping…" : "🚀 Ship agent"}
-      </button>
+      <div className="flex items-center gap-2.5">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            disabled={shipping}
+            className="rounded-[10px] border border-line px-5 py-3 text-sm font-semibold text-dim transition-all hover:-translate-y-0.5 hover:border-violet hover:text-violet-hi disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+          >
+            ← Back
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onShip}
+          disabled={!canShip || shipping}
+          className="self-start rounded-[10px] px-7 py-3 text-sm font-semibold text-on-accent transition-all hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+          style={{
+            background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+            boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+          }}
+        >
+          {shipping ? "⏳ Shipping…" : "🚀 Ship agent"}
+        </button>
+      </div>
     </div>
   );
 }

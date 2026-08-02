@@ -378,7 +378,7 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
           Execution handled by <b>Lyzr</b> · everything else forged by you
         </p>
 
-        {agent && showSource && (
+        {agent && (
           <AgentCardReveal
             agent={agent}
             campaign={campaign}
@@ -386,7 +386,7 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
           />
         )}
 
-        {agent && showSource && (
+        {agent && (
           <div
             className="mx-auto mt-6 max-w-[560px] rounded-2xl border border-line p-5 text-left"
             style={{ background: "linear-gradient(180deg, var(--color-panel), var(--color-panel-2))" }}
@@ -414,7 +414,7 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
           </div>
         )}
 
-        {agent && showSource && (
+        {agent && (
           <div className="ccard-actions" style={{ maxWidth: 560, margin: "22px auto 0", gridTemplateColumns: "repeat(2,1fr)" }}>
             <button
               type="button"
@@ -453,7 +453,7 @@ export default function ShipScreen({ campaignId }: { campaignId: string }) {
           </div>
         )}
 
-        {agent && showSource && (
+        {agent && (
           <div style={{ maxWidth: 560, margin: "10px auto 0" }}>
             <button
               type="button"

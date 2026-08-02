@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { db } from "../db";
 import {
   buildToolContract,
+  validateToolDef,
   type ParamsSchema,
   type ToolDefInput,
   type ToolDefRow,
@@ -86,18 +87,16 @@ export function copyToolDefs(fromAgentId: string, toAgentId: string): void {
   }
 }
 
-function normalizeToolBody(body: unknown): ToolDefInput | { error: string } {
+/** Parse only — deliberately does not judge name/description/endpoint
+ * validity here (see validateToolDef below, the same real gate /create and
+ * re-forge use). paramsSchema's per-param type check stays here since it's
+ * a structural parse concern validateToolDef doesn't cover. */
+function parseToolBody(body: unknown): ToolDefInput | { error: string } {
   const b = (body ?? {}) as Record<string, unknown>;
   const toolName = String(b.toolName ?? b.tool_name ?? "").trim();
   const description = String(b.description ?? "").trim();
   const endpointUrl = String(b.endpointUrl ?? b.endpoint_url ?? "").trim();
   const rawSchema = (b.paramsSchema ?? b.params_schema ?? {}) as Record<string, unknown>;
-
-  if (!toolName) return { error: "toolName is required" };
-  if (!/^[a-zA-Z0-9_]+$/.test(toolName)) {
-    return { error: "toolName must be a snake_case identifier (letters, digits, underscore)" };
-  }
-  if (!endpointUrl) return { error: "endpointUrl (or a built-in sentinel) is required" };
 
   const paramsSchema: ParamsSchema = {};
   for (const [k, v] of Object.entries(rawSchema)) {
@@ -112,16 +111,31 @@ function normalizeToolBody(body: unknown): ToolDefInput | { error: string } {
 
 router.post("/:agentId", (req: Request, res: Response) => {
   const agentId = String(req.params.agentId);
-  const normalized = normalizeToolBody(req.body);
-  if ("error" in normalized) return res.status(400).json({ error: normalized.error });
+  const parsed = parseToolBody(req.body);
+  if ("error" in parsed) return res.status(400).json({ error: parsed.error });
 
-  const existing = getToolRows(agentId).some((r) => r.tool_name === normalized.toolName);
-  if (existing) {
-    return res.status(409).json({ error: `a tool named "${normalized.toolName}" already exists on this agent` });
+  // Real backend-side gate (row 7b, closing the last of the three real
+  // entry points a tool config can enter through — see /create in
+  // routes/agent.ts and re-forge in routes/agents.ts for the other two).
+  // This is post-ship registration: the one path that previously only
+  // checked toolName's shape and endpointUrl's non-emptiness, letting a
+  // trivial description or a malformed "not-a-real-url" endpoint straight
+  // into tool_defs with no gate at all.
+  const errors = validateToolDef(parsed);
+  if (errors.length > 0) {
+    return res.status(400).json({
+      error: "Invalid tool configuration",
+      toolErrors: [{ toolName: parsed.toolName || "(unnamed)", errors }],
+    });
   }
 
-  const row = insertToolDef(agentId, normalized);
-  console.log(`[tools] registered "${normalized.toolName}" -> ${normalized.endpointUrl} on agentId=${agentId}`);
+  const existing = getToolRows(agentId).some((r) => r.tool_name === parsed.toolName);
+  if (existing) {
+    return res.status(409).json({ error: `a tool named "${parsed.toolName}" already exists on this agent` });
+  }
+
+  const row = insertToolDef(agentId, parsed);
+  console.log(`[tools] registered "${parsed.toolName}" -> ${parsed.endpointUrl} on agentId=${agentId}`);
   return res.json(rowToTool(row));
 });
 

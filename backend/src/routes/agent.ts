@@ -180,6 +180,7 @@ router.post("/create", async (req: Request, res: Response) => {
       extraFeatures,
       tools,
       crewRoles,
+      templateId,
     } = req.body ?? {};
 
     if (!userId || !name || !instructions || !model || temperature === undefined) {
@@ -243,11 +244,16 @@ router.post("/create", async (req: Request, res: Response) => {
     );
     const id = uuidv4();
     const now = new Date().toISOString();
+    // Metadata only (§3b: same skeleton/code regardless of template) —
+    // which ?template=<id> this freeform build started from, if any.
+    // "Start from scratch" and every pre-this-fix agent are genuinely null,
+    // not guessed.
+    const resolvedTemplateId = typeof templateId === "string" && templateId.trim() ? templateId.trim() : null;
 
     db.prepare(
       `INSERT INTO forged_agents
-        (id, user_id, campaign_id, name, lyzr_agent_id, config, original_config, lyzr_payload, forge_score, forge_time, xp_earned, version, forged_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+        (id, user_id, campaign_id, name, lyzr_agent_id, config, original_config, lyzr_payload, forge_score, forge_time, xp_earned, version, forged_at, template_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
     ).run(
       id,
       userId,
@@ -260,7 +266,8 @@ router.post("/create", async (req: Request, res: Response) => {
       forgeScore,
       Number(forgeTime) || 0,
       Number(xpEarned) || 0,
-      now
+      now,
+      resolvedTemplateId
     );
 
     // Shipping ends the in-progress build for this campaign — clear the
@@ -303,6 +310,7 @@ router.post("/create", async (req: Request, res: Response) => {
       xpEarned: Number(xpEarned) || 0,
       version: 1,
       forgedAt: now,
+      templateId: resolvedTemplateId,
       newAchievements,
     });
   } catch (err) {

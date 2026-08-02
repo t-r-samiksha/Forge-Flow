@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db";
-import { createLyzrAgent, LyzrConfigError } from "../services/lyzr";
+import { createLyzrAgent, deleteLyzrAgent, LyzrConfigError } from "../services/lyzr";
 import { calcForgeScore } from "../services/forgeScoring";
 import { copyToolDefs, toolContractForAgent, getToolRows, rowsToInputs } from "./tools";
 import { validateToolDef } from "../services/tools";
@@ -22,6 +22,7 @@ interface ForgedAgentRow {
   version: number;
   forged_at: string;
   last_edited_at: string | null;
+  template_id: string | null;
 }
 
 function rowToForgedAgent(row: ForgedAgentRow) {
@@ -39,6 +40,9 @@ function rowToForgedAgent(row: ForgedAgentRow) {
     version: row.version,
     forgedAt: row.forged_at,
     lastEditedAt: row.last_edited_at ?? undefined,
+    // Genuinely null for "Start from scratch" builds and for every agent
+    // shipped before this column existed — never guessed (row 1, FIX 1).
+    templateId: row.template_id ?? null,
   };
 }
 
@@ -147,6 +151,67 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
     }
     console.error(err);
     return res.status(502).json({ error: "Failed to re-forge agent on Lyzr" });
+  }
+});
+
+/** Real deletion (row: new capability, no prior DELETE route existed —
+ * every removal before this was a manual verification-script cleanup).
+ * Ownership is enforced by the WHERE clause below (agent must belong to
+ * :userId), same pattern GET/PUT already use. If this agent is a real
+ * Crew member or orchestrator, deletion is blocked rather than cascaded:
+ * crew_members/crew.orchestrator_agent_id key on this row's internal id
+ * (deliberately stable across re-forge, per §27/§6), and there is no crew
+ * repair/removal feature to fall back the routing onto — silently
+ * deleting would leave the crew's real ROUTE_TO pointing at a Lyzr agent
+ * that no longer exists. */
+router.delete("/:userId/:agentId", async (req: Request, res: Response) => {
+  try {
+    const { userId, agentId } = req.params;
+    const row = db
+      .prepare("SELECT * FROM forged_agents WHERE user_id = ? AND id = ?")
+      .get(userId, agentId) as ForgedAgentRow | undefined;
+    if (!row) return res.status(404).json({ error: "Agent not found" });
+
+    const asMember = db
+      .prepare("SELECT role_label FROM crew_members WHERE forged_agent_id = ?")
+      .get(agentId) as { role_label: string } | undefined;
+    const asOrchestrator = db
+      .prepare("SELECT id FROM crews WHERE orchestrator_agent_id = ?")
+      .get(agentId) as { id: string } | undefined;
+    if (asMember) {
+      return res.status(409).json({
+        error: `This agent is a real crew member ("${asMember.role_label}") — deleting it would break that crew's routing. Crew deletion/repair isn't supported yet, so this agent can't be deleted on its own.`,
+      });
+    }
+    if (asOrchestrator) {
+      return res.status(409).json({
+        error:
+          "This agent is a real crew's orchestrator — deleting it would break the whole crew. Crew deletion isn't supported yet, so this agent can't be deleted on its own.",
+      });
+    }
+
+    await deleteLyzrAgent(row.lyzr_agent_id);
+
+    // Real dependent rows, cleaned up alongside the parent — knowledge_docs
+    // and tool_defs are keyed by the real Lyzr agent id (§10), redteam_runs
+    // by this row's internal id.
+    const knowledgeDeleted = db.prepare("DELETE FROM knowledge_docs WHERE agent_id = ?").run(row.lyzr_agent_id);
+    const toolsDeleted = db.prepare("DELETE FROM tool_defs WHERE agent_id = ?").run(row.lyzr_agent_id);
+    const redteamDeleted = db.prepare("DELETE FROM redteam_runs WHERE agent_id = ?").run(agentId);
+    db.prepare("DELETE FROM forged_agents WHERE id = ?").run(agentId);
+
+    console.log(
+      `[agents] deleted agentId=${agentId} (lyzr=${row.lyzr_agent_id}) — ` +
+        `knowledge_docs=${knowledgeDeleted.changes} tool_defs=${toolsDeleted.changes} redteam_runs=${redteamDeleted.changes}`
+    );
+
+    return res.json({ deleted: true, id: agentId });
+  } catch (err) {
+    if (err instanceof LyzrConfigError) {
+      return res.status(503).json({ error: err.message, code: "LYZR_NOT_CONFIGURED" });
+    }
+    console.error(err);
+    return res.status(502).json({ error: "Failed to delete agent on Lyzr" });
   }
 });
 

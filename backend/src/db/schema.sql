@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS forged_agents (
   xp_earned INTEGER,
   version INTEGER DEFAULT 1,
   forged_at TEXT DEFAULT (datetime('now')),
-  last_edited_at TEXT
+  last_edited_at TEXT,
+  template_id TEXT  -- which freeform template (?template=<id>) this build started from, null for genuine "Start from scratch" or pre-this-fix agents
 );
 
 CREATE TABLE IF NOT EXISTS achievements (

@@ -23,6 +23,9 @@ const forgedAgentsCols = db.prepare("PRAGMA table_info(forged_agents)").all() as
 if (!forgedAgentsCols.some((c) => c.name === "lyzr_payload")) {
   db.exec("ALTER TABLE forged_agents ADD COLUMN lyzr_payload TEXT");
 }
+if (!forgedAgentsCols.some((c) => c.name === "template_id")) {
+  db.exec("ALTER TABLE forged_agents ADD COLUMN template_id TEXT");
+}
 
 const usersCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
 if (!usersCols.some((c) => c.name === "completed_missions")) {

@@ -80,6 +80,15 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
   const continueBtnRef = useRef<HTMLButtonElement>(null);
   const encouragementFired = useRef<Set<"first" | "half" | "all">>(new Set());
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // True only between "a real edit/mission-complete scheduled a save" and
+  // "that save actually went out" — without this, merely visiting a
+  // campaign build page (e.g. a direct /build/<id> URL while a different
+  // build is already in progress) and closing without touching anything
+  // would flush campaignId + the store's current (possibly blank, possibly
+  // stale) slotValues on unload, silently overwriting whatever real
+  // progress was saved before (same class of bug found and fixed in the
+  // freeform/Crew builders).
+  const hasPendingEditRef = useRef(false);
 
   const campaign = getCampaign(campaignId)!;
   const missions = campaign.missions;
@@ -123,7 +132,9 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
   // build flow.
   useEffect(() => {
     const flush = () => {
+      if (!hasPendingEditRef.current) return;
       clearTimeout(autosaveTimer.current);
+      hasPendingEditRef.current = false;
       const state = useGameStore.getState();
       saveProgress(
         getUserId(),
@@ -208,8 +219,16 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
       next.bpStatusText = missionComplete ? "ready to run" : "assembling";
     }
     setBp(next);
+    // Real bug found while verifying FIX 4: this effect reads the store's
+    // slotValues to rehydrate on resume, but ran (twice, StrictMode) before
+    // ProgressSync's async getProgress() had populated it, then never
+    // re-ran once hydration completed since progressLoaded wasn't a
+    // dependency — the mission always rendered blank even though the real
+    // data had already loaded into the store one tick later. Re-running
+    // once progressLoaded flips true re-derives everything above from the
+    // now-populated store; harmless no-op on a genuinely fresh build.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missionIdx]);
+  }, [missionIdx, progressLoaded]);
 
   const blocking = checked.filter((c) => !c).length;
   const passed = checked.filter(Boolean).length;
@@ -316,6 +335,7 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
     // filled since the last mission-boundary save.
     clearTimeout(autosaveTimer.current);
     if (passes) {
+      hasPendingEditRef.current = true;
       autosaveTimer.current = setTimeout(() => {
         const state = useGameStore.getState();
         saveProgress(getUserId(), {
@@ -323,9 +343,13 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
           currentMissionIndex: missionIdx,
           slotValues: state.slotValues,
           buildTimerSeconds: state.timerSeconds,
-        }).catch(() => {
-          /* non-blocking — best-effort checkpoint */
-        });
+        })
+          .catch(() => {
+            /* non-blocking — best-effort checkpoint */
+          })
+          .finally(() => {
+            hasPendingEditRef.current = false;
+          });
       }, 1200);
     }
   };
@@ -343,6 +367,7 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
     confettiBurst(16);
 
     clearTimeout(autosaveTimer.current);
+    hasPendingEditRef.current = true;
     const state = useGameStore.getState();
     saveProgress(getUserId(), {
       xp: state.xp,
@@ -359,6 +384,9 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
       })
       .catch(() => {
         /* non-blocking — local state already updated, will sync next successful call */
+      })
+      .finally(() => {
+        hasPendingEditRef.current = false;
       });
 
     if (missionIdx < missions.length - 1) {
@@ -378,6 +406,24 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
       }, 700);
     }
   };
+
+  // Chain-symmetric back: the editor is always preceded by this same
+  // mission's own intro screen (mirroring Continue, which always leads
+  // forward to the NEXT mission's intro) — so Back from the editor never
+  // has a "first mission" exception, unlike Continue/Begin.
+  const handleBack = () => {
+    if (advancing) return;
+    setShowIntro(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // Intro's own back: the [campaignId, missionIdx] effect below always
+  // forces showIntro back to true on any index change (it's what
+  // rehydrates that mission's slots/blueprint), so landing straight in the
+  // previous mission's editor isn't possible here — this lands on the
+  // previous mission's own intro instead, still a real, correct "back".
+  // Undefined on mission 1 — the true first page of a campaign build.
+  const handleBackFromIntro = missionIdx === 0 ? undefined : () => setMissionIdx((i) => i - 1);
 
   const crumb = useMemo(
     () => (
@@ -410,6 +456,7 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
         missionNumber={missionIdx + 1}
         totalMissions={missions.length}
         onBegin={() => setShowIntro(false)}
+        onPrev={handleBackFromIntro}
       />
     );
   }
@@ -479,27 +526,39 @@ export default function BuildScreen({ campaignId }: { campaignId: string }) {
             <span className="font-mono text-xs text-mute">
               <b className="text-spring">{passed}</b> / {checked.length} slots verified
             </span>
-            <button
-              ref={continueBtnRef}
-              type="button"
-              disabled={!allChecked || advancing}
-              onClick={handleContinue}
-              className={`rounded-[10px] px-[26px] py-3 text-sm font-semibold transition-all ${
-                allChecked && !advancing
-                  ? "-translate-y-0 cursor-pointer text-on-accent hover:-translate-y-0.5"
-                  : "cursor-not-allowed border border-line bg-panel-3 text-mute"
-              }`}
-              style={
-                allChecked && !advancing
-                  ? {
-                      background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
-                      boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
-                    }
-                  : undefined
-              }
-            >
-              {missionIdx === missions.length - 1 ? "Ship the agent →" : "Continue →"}
-            </button>
+            <div className="flex items-center gap-2.5">
+              {/* Always available — this same mission's own intro screen is
+                  always the immediate predecessor of its editor. */}
+              <button
+                type="button"
+                disabled={advancing}
+                onClick={handleBack}
+                className="rounded-[10px] border border-line px-5 py-3 text-sm font-semibold text-dim transition-all hover:-translate-y-0.5 hover:border-violet hover:text-violet-hi disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+              >
+                ← Back
+              </button>
+              <button
+                ref={continueBtnRef}
+                type="button"
+                disabled={!allChecked || advancing}
+                onClick={handleContinue}
+                className={`rounded-[10px] px-[26px] py-3 text-sm font-semibold transition-all ${
+                  allChecked && !advancing
+                    ? "-translate-y-0 cursor-pointer text-on-accent hover:-translate-y-0.5"
+                    : "cursor-not-allowed border border-line bg-panel-3 text-mute"
+                }`}
+                style={
+                  allChecked && !advancing
+                    ? {
+                        background: "linear-gradient(135deg, var(--color-violet), var(--color-violet-deep))",
+                        boxShadow: "0 8px 28px -8px rgba(var(--color-violet-rgb)/.75)",
+                      }
+                    : undefined
+                }
+              >
+                {missionIdx === missions.length - 1 ? "Ship the agent →" : "Continue →"}
+              </button>
+            </div>
           </div>
         </div>
 

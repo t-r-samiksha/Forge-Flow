@@ -19,9 +19,10 @@ import {
   MessageCircle,
   MoreVertical,
   Swords,
+  Trash2,
 } from "lucide-react";
 import { reducedMotion } from "@/lib/effects";
-import { listAgents, type ApiForgedAgent } from "@/lib/api";
+import { listAgents, deleteAgent, type ApiForgedAgent } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import { useGameStore } from "@/lib/store";
 import { getCampaign, type Campaign } from "@/lib/campaigns";
@@ -48,17 +49,39 @@ function TiltCard({
   campaign,
   shipped,
   skipEntrance,
+  onDeleted,
 }: {
   campaign: Campaign;
   shipped: ApiForgedAgent | null;
   skipEntrance: boolean;
+  onDeleted: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties>({});
   const [menuOpen, setMenuOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const router = useRouter();
   const achievements = useGameStore((s) => s.achievements);
+
+  const handleDelete = async () => {
+    if (!shipped || deleting) return;
+    setMenuOpen(false);
+    const ok = window.confirm(
+      `Delete "${shipped.name}"? This permanently deletes the real Lyzr agent and can't be undone.`
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await deleteAgent(getUserId(), shipped.id);
+      showToast("🗑", "Agent deleted.");
+      onDeleted();
+    } catch (err) {
+      showToast("⚠", err instanceof Error ? err.message : "Failed to delete agent.");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -183,6 +206,17 @@ function TiltCard({
               >
                 <Link2 size={14} /> Share certificate
               </button>
+              <button
+                type="button"
+                className="ccard-menu-item ccard-menu-item-danger"
+                disabled={deleting}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDelete();
+                }}
+              >
+                <Trash2 size={14} /> {deleting ? "Deleting…" : "Delete agent"}
+              </button>
             </div>
           )}
         </div>
@@ -268,14 +302,28 @@ function TiltCard({
  * to key its title/icon/tags off of. Real config (role/model) is read
  * from the agent's own lyzrPayload via freeformShippedConfig, same source
  * the post-ship hub and the 4 destination screens already use. */
-function FreeformAgentCard({ agent, skipEntrance }: { agent: ApiForgedAgent; skipEntrance: boolean }) {
+function FreeformAgentCard({
+  agent,
+  skipEntrance,
+  onDeleted,
+}: {
+  agent: ApiForgedAgent;
+  skipEntrance: boolean;
+  onDeleted: () => void;
+}) {
   const cardRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties>({});
   const [menuOpen, setMenuOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const router = useRouter();
   const achievements = useGameStore((s) => s.achievements);
   const cfg = freeformShippedConfig(agent);
+  // Real template provenance (row 1, FIX 1) — the real campaign/template
+  // title when this build started from ?template=<id>, "Freeform" for a
+  // genuine "Start from scratch" build or an agent shipped before
+  // templateId existed (never guessed).
+  const templateTitle = agent.templateId ? getCampaign(agent.templateId)?.title : undefined;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -287,6 +335,24 @@ function FreeformAgentCard({ agent, skipEntrance }: { agent: ApiForgedAgent; ski
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, [menuOpen]);
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    setMenuOpen(false);
+    const ok = window.confirm(
+      `Delete "${agent.name}"? This permanently deletes the real Lyzr agent and can't be undone.`
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await deleteAgent(getUserId(), agent.id);
+      showToast("🗑", "Agent deleted.");
+      onDeleted();
+    } catch (err) {
+      showToast("⚠", err instanceof Error ? err.message : "Failed to delete agent.");
+      setDeleting(false);
+    }
+  };
 
   const downloadCertificate = async () => {
     const data = buildCertData(agent, undefined, achievements);
@@ -394,6 +460,17 @@ function FreeformAgentCard({ agent, skipEntrance }: { agent: ApiForgedAgent; ski
             >
               <Link2 size={14} /> Share certificate
             </button>
+            <button
+              type="button"
+              className="ccard-menu-item ccard-menu-item-danger"
+              disabled={deleting}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleDelete();
+              }}
+            >
+              <Trash2 size={14} /> {deleting ? "Deleting…" : "Delete agent"}
+            </button>
           </div>
         )}
       </div>
@@ -403,7 +480,7 @@ function FreeformAgentCard({ agent, skipEntrance }: { agent: ApiForgedAgent; ski
         {cfg.role} · {cfg.model}
       </p>
       <div className="ccard-stack">
-        <span className="tag">Freeform</span>
+        <span className="tag">{templateTitle ? `${templateTitle} template` : "Freeform"}</span>
       </div>
       <div className="ccard-meta">
         <span>
@@ -605,8 +682,18 @@ export default function CampaignMapScreen() {
           </div>
           <div className="campaign-grid">
             <ScratchCard />
-            <TiltCard campaign={retrieverCampaign} shipped={shippedRetriever} skipEntrance={heroPlayed} />
-            <TiltCard campaign={toolAgentCampaign} shipped={shippedToolAgent} skipEntrance={heroPlayed} />
+            <TiltCard
+              campaign={retrieverCampaign}
+              shipped={shippedRetriever}
+              skipEntrance={heroPlayed}
+              onDeleted={() => setShippedRetriever(null)}
+            />
+            <TiltCard
+              campaign={toolAgentCampaign}
+              shipped={shippedToolAgent}
+              skipEntrance={heroPlayed}
+              onDeleted={() => setShippedToolAgent(null)}
+            />
             <CrewCard />
           </div>
 
@@ -622,7 +709,12 @@ export default function CampaignMapScreen() {
               </div>
               <div className="campaign-grid">
                 {freeformAgents.map((agent) => (
-                  <FreeformAgentCard key={agent.id} agent={agent} skipEntrance={heroPlayed} />
+                  <FreeformAgentCard
+                    key={agent.id}
+                    agent={agent}
+                    skipEntrance={heroPlayed}
+                    onDeleted={() => setFreeformAgents((prev) => prev.filter((a) => a.id !== agent.id))}
+                  />
                 ))}
               </div>
             </>
