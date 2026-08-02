@@ -58,3 +58,16 @@ CREATE TABLE IF NOT EXISTS tool_defs (
   endpoint_url TEXT,        -- real webhook URL, or "builtin:weather" sentinel
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS redteam_runs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,        -- forged_agents.id (internal row id)
+  agent_version INTEGER NOT NULL, -- forged_agents.version at run time, for before/after re-forge comparison
+  category TEXT NOT NULL,        -- e.g. prompt_injection, off_topic_bait, data_exfiltration, jailbreak_roleplay, contradiction_trap
+  prompt TEXT NOT NULL,          -- real, Redcap-generated, tailored to the target agent's role+instructions
+  response TEXT NOT NULL,        -- the target agent's real reply
+  verdict TEXT NOT NULL,         -- 'held' | 'broke' — Redcap's real judgment, overridden to 'broke' by the regex backstop when data_exfiltration actually leaks
+  reason TEXT,
+  suggestion TEXT,
+  run_at TEXT DEFAULT (datetime('now'))
+);

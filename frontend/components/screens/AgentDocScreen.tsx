@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { getAgent, reforgeAgent, LyzrNotConfiguredError, type ApiForgedAgent } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import { getCampaign, resolveAgentConfig } from "@/lib/campaigns";
+import { freeformShippedConfig } from "@/lib/freeformAgentView";
 import { estimateCost, knownModelKeys } from "@/lib/estimator";
 import { showToast } from "@/lib/effects";
 import { useGameStore } from "@/lib/store";
@@ -88,7 +89,25 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
 
   if (notFound) return null;
 
-  if (!agent || !campaign || missions.length === 0) {
+  if (!agent) {
+    return (
+      <div className="mx-auto max-w-[720px] px-6 py-24 text-center">
+        <p className="text-sm text-dim">Loading agent…</p>
+      </div>
+    );
+  }
+
+  // Freeform agents have no fixed campaign narrative — no mission
+  // write-ups, no glossary, no per-mission code snippets to draw from
+  // without fabricating them (CLAUDE.md hard rule #1). This shows only
+  // the sections that are already 100% real for any agent regardless of
+  // campaign: the raw create payload, a live test console, the knowledge
+  // panel, and the cost/latency table.
+  if (!campaign) {
+    return <FreeformDocView agent={agent} router={router} />;
+  }
+
+  if (missions.length === 0) {
     return (
       <div className="mx-auto max-w-[720px] px-6 py-24 text-center">
         <p className="text-sm text-dim">Loading agent…</p>
@@ -439,6 +458,226 @@ export default function AgentDocScreen({ agentId }: { agentId: string }) {
             >
               💬 Talk to Agent
             </button>
+          </div>
+        </article>
+      </div>
+    </div>
+  );
+}
+
+function formatBuildTime(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
+  const s = Math.floor(totalSeconds % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+function FreeformDocView({
+  agent,
+  router,
+}: {
+  agent: ApiForgedAgent;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const cfg = freeformShippedConfig(agent);
+  const toc = [
+    { id: "l-overview", label: "Overview" },
+    { id: "l-structure", label: "Code structure (raw)" },
+    { id: "l-test", label: "Test console" },
+    { id: "l-knowledge", label: "Knowledge" },
+    { id: "l-cost", label: "Cost & latency" },
+  ];
+  const [activeSection, setActiveSection] = useState("l-overview");
+  const testSessionIdRef = useRef(crypto.randomUUID());
+
+  useEffect(() => {
+    const onScroll = () => {
+      const sections = toc
+        .map((t) => document.getElementById(t.id))
+        .filter((el): el is HTMLElement => !!el);
+      let current = sections[0];
+      for (const s of sections) {
+        if (s.getBoundingClientRect().top - 90 <= 0) current = s;
+      }
+      if (current) setActiveSection(current.id);
+    };
+    window.addEventListener("scroll", onScroll);
+    onScroll();
+    return () => window.removeEventListener("scroll", onScroll);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="mx-auto max-w-[1240px] px-6 py-16">
+      <div className="subnav">
+        <button type="button" className="back-link" onClick={() => router.push("/campaigns")}>
+          ← back to ForgeFlow
+        </button>
+        <button
+          type="button"
+          className="ccard-btn talk"
+          style={{ flex: "none" }}
+          onClick={() => router.push(`/agent/${agent.id}/chat`)}
+        >
+          💬 Talk to this agent
+        </button>
+      </div>
+
+      <div className="learn-hero">
+        <div className="learn-kicker">Freeform Build</div>
+        <h1>
+          Everything you <span className="accent">forged</span>, in one place.
+        </h1>
+        <p className="lede" style={{ marginBottom: 0 }}>
+          A freeform build has no fixed script — here&apos;s exactly what&apos;s real about this
+          agent: the payload it was created from, a live test console, its knowledge base, and
+          what it actually costs to run.
+        </p>
+        <div className="learn-meta">
+          <span>
+            ⏱ build time <b>{formatBuildTime(agent.forgeTime)}</b>
+          </span>
+          <span>
+            ⚡ XP earned <b>{agent.xpEarned}</b>
+          </span>
+          <span>
+            🧠 model <b>{cfg.model}</b>
+          </span>
+          <span>
+            ✓ forge score <b>{agent.forgeScore}/100</b>
+          </span>
+        </div>
+      </div>
+
+      <div className="learn-wrap">
+        <nav className="learn-toc">
+          <div className="learn-toc-label">Contents</div>
+          {toc.map((t) => (
+            <a
+              key={t.id}
+              href={`#${t.id}`}
+              className={activeSection === t.id ? "active" : undefined}
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById(t.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+            >
+              {t.label}
+            </a>
+          ))}
+        </nav>
+
+        <article className="learn-article">
+          <section id="l-overview">
+            <h2>
+              <span className="sn">·</span> Overview
+            </h2>
+            <p>
+              <b>{agent.name}</b> — {cfg.role}. {cfg.goal}
+            </p>
+            <p>Instructions: {cfg.instructions}</p>
+          </section>
+
+          <section id="l-structure">
+            <h2>
+              <span className="sn">{"{}"}</span> Code structure (raw)
+            </h2>
+            <p>
+              The exact JSON payload your agent was created from on Lyzr — no formatting, no
+              paraphrasing, straight from the API response.
+            </p>
+            <CodeStructureSection payload={agent.lyzrPayload} />
+          </section>
+
+          <section id="l-test">
+            <h2>
+              <span className="sn">▶</span> Test console
+            </h2>
+            <p>
+              A real call to the shipped agent, right here — same as Talk to Agent, scoped to one
+              quick check.
+            </p>
+            <TestConsole agentId={agent.lyzrAgentId} sessionId={testSessionIdRef.current} />
+          </section>
+
+          <section id="l-knowledge">
+            <h2>
+              <span className="sn">📚</span> Knowledge
+            </h2>
+            <p>
+              Optional grounding — any docs ingested here get chunked, embedded, and searched
+              against before each chat reply, and cited from instead of the model guessing.
+            </p>
+            <KnowledgePanel agentId={agent.lyzrAgentId} />
+          </section>
+
+          <section id="l-cost">
+            <h2>
+              <span className="sn">$</span> Cost &amp; latency
+            </h2>
+            <p>
+              Every model choice is a cost/speed/quality trade — here&apos;s what your pick
+              actually costs per query, next to the alternative.
+            </p>
+            <table className="cost-table">
+              <thead>
+                <tr>
+                  <th>model</th>
+                  <th>tokens/query</th>
+                  <th>est. cost/query</th>
+                  <th>est. latency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {knownModelKeys().map((key) => {
+                  const est = estimateCost(key, "5");
+                  const mine = key === cfg.model;
+                  const barPct = Math.min(100, (est.cost / 0.0015) * 100);
+                  return (
+                    <tr key={key} className={mine ? "mine" : undefined}>
+                      <td>
+                        <b>{key}</b>
+                        {mine && (
+                          <span className="snippet-tag" style={{ marginLeft: 8 }}>
+                            yours
+                          </span>
+                        )}
+                      </td>
+                      <td>{est.totalTokens} tok</td>
+                      <td>
+                        <span className="cost-bar-wrap">
+                          <span className="cost-bar" style={{ width: `${barPct}%` }} />
+                        </span>
+                        ${est.cost.toFixed(5)}
+                      </td>
+                      <td>~{est.latencyMs}ms</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+
+          <div className="learn-cta">
+            <h3>Put it under pressure</h3>
+            <p>Fork this config and compare it head-to-head, or send in the red team and see if it holds.</p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="ccard-btn cmp"
+                style={{ maxWidth: 200 }}
+                onClick={() => router.push(`/agent/${agent.id}/compare`)}
+              >
+                🧬 Compare
+              </button>
+              <button
+                type="button"
+                className="ccard-btn arena"
+                style={{ maxWidth: 200 }}
+                onClick={() => router.push(`/agent/${agent.id}/arena`)}
+              >
+                ⚔️ Red Team
+              </button>
+            </div>
           </div>
         </article>
       </div>

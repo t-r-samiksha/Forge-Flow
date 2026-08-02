@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   chatWithAgent,
@@ -11,8 +11,8 @@ import {
   type ApiForgedAgent,
 } from "@/lib/api";
 import { getUserId } from "@/lib/session";
-import { getCampaign, resolveAgentConfig, type ArenaAttack } from "@/lib/campaigns";
-import { FREEFORM_ARENA_ATTACKS, freeformShippedConfig } from "@/lib/freeformAgentView";
+import { getCampaign, resolveAgentConfig } from "@/lib/campaigns";
+import { freeformShippedConfig } from "@/lib/freeformAgentView";
 import { estimateCost, knownModelKeys } from "@/lib/estimator";
 import { buildShareUrl } from "@/lib/share";
 import { confettiBurst, showToast } from "@/lib/effects";
@@ -47,8 +47,13 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
   const aInstrRef = useRef<HTMLDivElement>(null);
   const bInstrRef = useRef<HTMLTextAreaElement>(null);
 
-  const fixParam = searchParams.get("fix");
-  const fixIndex = fixParam !== null ? parseInt(fixParam, 10) : null;
+  // Real Red Team Arena results are dynamically generated per run (§7,
+  // Redcap), not a fixed indexable array — so "Test this fix in Compare"
+  // hands off the actual prompt/category/suggestion inline via query
+  // params instead of an index into a static list.
+  const fixCategory = searchParams.get("fixCategory");
+  const fixPromptParam = searchParams.get("fixPrompt");
+  const fixSuggestionParam = searchParams.get("fixSuggestion");
 
   useEffect(() => {
     getAgent(getUserId(), agentId)
@@ -61,11 +66,13 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
   }, [notFound, router]);
 
   const campaign = agent ? getCampaign(agent.campaignId) : undefined;
-  // A fixed campaign ships its own arenaAttacks; freeform has no campaign to
-  // draw one from, so a "Test this fix in Compare →" link from Arena (which
-  // reads the same fallback list) still resolves to a real attack.
-  const attacks = campaign?.arenaAttacks ?? FREEFORM_ARENA_ATTACKS;
-  const fixAttack: ArenaAttack | null = fixIndex !== null ? attacks[fixIndex] ?? null : null;
+  const fixAttack = useMemo(
+    () =>
+      fixPromptParam !== null
+        ? { category: fixCategory ?? "security", prompt: fixPromptParam, suggestion: fixSuggestionParam ?? "" }
+        : null,
+    [fixCategory, fixPromptParam, fixSuggestionParam]
+  );
 
   useEffect(() => {
     if (!agent || initialized) return;
@@ -73,8 +80,8 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
     if (fixAttack) {
       setQuery(fixAttack.prompt);
       setBModel(a.model);
-      setBTemp(String(fixAttack.fixTemp));
-      setBInstr(`${a.instructions} ${fixAttack.fixInstruction}`.trim());
+      setBTemp("0.15");
+      setBInstr(`${a.instructions} ${fixAttack.suggestion}`.trim());
     } else {
       setQuery(campaign?.runScenarios[0]?.q ?? campaign?.chatScenarios[0]?.q ?? "");
       setBModel(a.model === "gemini-2.5-pro" ? "gemini-2.5-flash" : "gemini-2.5-pro");
@@ -236,7 +243,7 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
         securityMode,
         chanceA,
         chanceB,
-        attackType: fixAttack?.type ?? null,
+        attackType: fixAttack?.category ?? null,
       })
     );
   };
@@ -274,7 +281,9 @@ export default function CompareScreen({ agentId }: { agentId: string }) {
 
         {securityMode && (
           <div className="cmp-context">
-            🐞 Testing a fix for <b>{fixAttack?.type}</b> — Version A is the config that broke in
+            🐞 Testing a fix for{" "}
+            <b>{fixAttack?.category ? fixAttack.category.replace(/_/g, " ") : ""}</b> — Version A is
+            the config that broke in
             Red Team Arena. Version B has the suggested fix pre-filled.
           </div>
         )}

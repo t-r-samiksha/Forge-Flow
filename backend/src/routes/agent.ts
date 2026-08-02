@@ -50,7 +50,7 @@ function normalizeIncomingTools(raw: unknown): ToolDefInput[] {
  * result back into the same session, looping until the agent answers in
  * natural language (or we hit the safety cap). No tools / no marker →
  * the original response is returned untouched. */
-async function runToolLoop(
+export async function runToolLoop(
   agentId: string,
   sessionId: string,
   firstResponse: string
@@ -119,7 +119,7 @@ async function runToolLoop(
  * chunks for the query and prepends them to the message sent to Lyzr.
  * Falls back to the raw message on any retrieval failure — a knowledge
  * base outage shouldn't take down chat entirely. */
-async function withRetrievedContext(agentId: string, message: string): Promise<string> {
+export async function withRetrievedContext(agentId: string, message: string): Promise<string> {
   const docCount = (
     db.prepare("SELECT COUNT(*) AS c FROM knowledge_docs WHERE agent_id = ?").get(agentId) as {
       c: number;

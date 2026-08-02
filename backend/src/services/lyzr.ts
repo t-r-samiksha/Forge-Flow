@@ -104,6 +104,52 @@ export async function chatWithMentorAgent(
   return { response: data.response };
 }
 
+function requireRedcapAgentId(): string {
+  const agentId = process.env.LYZR_REDCAP_AGENT_ID;
+  if (!agentId) {
+    throw new LyzrConfigError(
+      "LYZR_REDCAP_AGENT_ID is not configured — add the Redcap agent ID to backend/.env"
+    );
+  }
+  return agentId;
+}
+
+/** Red Team Arena's judge/attack-generator (FORGEFLOW_V3_SPEC.md §7) — one
+ * pre-provisioned Lyzr agent with two-mode instructions (MODE:ATTACK /
+ * MODE:JUDGE), same fixed-agent_id-in-.env pattern as Nova. */
+export async function chatWithRedcapAgent(
+  message: string,
+  userId: string,
+  sessionId: string
+): Promise<{ response: string }> {
+  const apiKey = requireApiKey();
+  const agentId = requireRedcapAgentId();
+  const t0 = Date.now();
+  console.log(
+    `[lyzr] -> POST ${LYZR_BASE}/inference/chat/  (redcap, message="${message.slice(0, 80)}${message.length > 80 ? "…" : ""}")`
+  );
+  const res = await fetch(`${LYZR_BASE}/inference/chat/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+    body: JSON.stringify({
+      user_id: `forge_user_${userId}`,
+      agent_id: agentId,
+      session_id: sessionId,
+      message,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    console.log(`[lyzr] <- ${res.status} in ${Date.now() - t0}ms — FAILED: ${text}`);
+    throw new Error(`Lyzr redcap chat failed (${res.status}): ${text}`);
+  }
+  const data = (await res.json()) as { response: string };
+  console.log(
+    `[lyzr] <- ${res.status} in ${Date.now() - t0}ms — "${data.response.slice(0, 80)}${data.response.length > 80 ? "…" : ""}"`
+  );
+  return { response: data.response };
+}
+
 export async function chatWithLyzrAgent(
   agentId: string,
   message: string,

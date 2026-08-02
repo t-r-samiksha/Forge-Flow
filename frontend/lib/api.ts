@@ -107,6 +107,44 @@ export async function listAgents(userId: string): Promise<ApiForgedAgent[]> {
   return handle<ApiForgedAgent[]>(res);
 }
 
+export interface RedTeamResult {
+  category: string;
+  prompt: string;
+  response: string;
+  verdict: "held" | "broke";
+  reason: string;
+  suggestion: string;
+}
+
+/** Real Red Team Arena pass (FORGEFLOW_V3_SPEC.md §7): Redcap generates 5
+ * prompts tailored to the target agent's real role/instructions, each is
+ * sent for real to the target, and Redcap judges each real response —
+ * synchronous end to end, so this can take up to ~a minute for the 11
+ * sequential real Lyzr calls it makes server-side. */
+export async function runRedTeam(
+  userId: string,
+  agentId: string
+): Promise<{ results: RedTeamResult[]; agentVersion: number }> {
+  const res = await fetch(`${API_URL}/api/redteam/run/${agentId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId }),
+  });
+  return handle<{ results: RedTeamResult[]; agentVersion: number }>(res);
+}
+
+export interface RedTeamHistoryRow extends RedTeamResult {
+  id: string;
+  agent_id: string;
+  agent_version: number;
+  run_at: string;
+}
+
+export async function getRedTeamHistory(agentId: string): Promise<RedTeamHistoryRow[]> {
+  const res = await fetch(`${API_URL}/api/redteam/${agentId}/history`);
+  return handle<RedTeamHistoryRow[]>(res);
+}
+
 export async function getAgent(userId: string, agentId: string): Promise<ApiForgedAgent> {
   const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}`);
   return handle<ApiForgedAgent>(res);

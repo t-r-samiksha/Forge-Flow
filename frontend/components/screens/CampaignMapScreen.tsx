@@ -25,6 +25,7 @@ import { listAgents, type ApiForgedAgent } from "@/lib/api";
 import { getUserId } from "@/lib/session";
 import { useGameStore } from "@/lib/store";
 import { getCampaign, type Campaign } from "@/lib/campaigns";
+import { freeformShippedConfig } from "@/lib/freeformAgentView";
 import { buildCertData, drawCertificate } from "@/lib/certificate";
 import { buildShareUrl } from "@/lib/share";
 import { showToast } from "@/lib/effects";
@@ -260,6 +261,207 @@ function TiltCard({
   );
 }
 
+/** One card per freeform-shipped agent (campaignId "custom") — same
+ * ccard/ccard-actions-v2 styling and action set as TiltCard's shipped
+ * state (Talk/View/Red Team/Compare + a certificate kebab menu), adapted
+ * rather than shared 1:1 since a freeform agent has no fixed `Campaign`
+ * to key its title/icon/tags off of. Real config (role/model) is read
+ * from the agent's own lyzrPayload via freeformShippedConfig, same source
+ * the post-ship hub and the 4 destination screens already use. */
+function FreeformAgentCard({ agent, skipEntrance }: { agent: ApiForgedAgent; skipEntrance: boolean }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [style, setStyle] = useState<CSSProperties>({});
+  const [menuOpen, setMenuOpen] = useState(false);
+  const router = useRouter();
+  const achievements = useGameStore((s) => s.achievements);
+  const cfg = freeformShippedConfig(agent);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClickOutside = (e: globalThis.MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [menuOpen]);
+
+  const downloadCertificate = async () => {
+    const data = buildCertData(agent, undefined, achievements);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1000;
+    canvas.height = 600;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      await document.fonts.ready;
+    }
+    drawCertificate(ctx, canvas.width, canvas.height, data);
+    const a = document.createElement("a");
+    a.download = "agent-forge-certificate.png";
+    a.href = canvas.toDataURL("image/png");
+    a.click();
+    showToast("⬇", "Certificate downloaded.");
+    setMenuOpen(false);
+  };
+
+  const shareCertificate = () => {
+    const data = buildCertData(agent, undefined, achievements);
+    const url = buildShareUrl("cert", data);
+    navigator.clipboard?.writeText(url);
+    showToast("🔗", "Certificate link copied — paste it anywhere.");
+    setMenuOpen(false);
+  };
+
+  const handleMove = (e: MouseEvent<HTMLDivElement>) => {
+    const card = cardRef.current;
+    if (!card || reducedMotion()) return;
+    const r = card.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width;
+    const py = (e.clientY - r.top) / r.height;
+    const rx = (py - 0.5) * -8;
+    const ry = (px - 0.5) * 10;
+    setStyle({
+      transform: `translateY(-4px) rotateX(${rx}deg) rotateY(${ry}deg)`,
+      // @ts-expect-error custom property
+      "--mx": `${e.clientX - r.left}px`,
+      "--my": `${e.clientY - r.top}px`,
+    });
+  };
+
+  const handleLeave = () => setStyle({});
+
+  return (
+    <div
+      ref={cardRef}
+      onMouseMove={handleMove}
+      onMouseLeave={handleLeave}
+      style={style}
+      className="ccard completed"
+    >
+      <motion.div
+        initial={skipEntrance ? false : { opacity: 0, y: -4, scale: 0.6 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.5, ease: [0.34, 1.56, 0.64, 1] }}
+        className="ccard-ribbon"
+      >
+        shipped
+      </motion.div>
+      <div ref={menuRef} className="ccard-kebab-wrap">
+        <button
+          type="button"
+          className="ccard-kebab"
+          aria-label="Certificate options"
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuOpen((v) => !v);
+          }}
+        >
+          <MoreVertical size={15} />
+        </button>
+        {menuOpen && (
+          <div className="ccard-menu">
+            <button
+              type="button"
+              className="ccard-menu-item"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen(false);
+                router.push(`/agent/${agent.id}/certificate`);
+              }}
+            >
+              <Award size={14} /> View certificate
+            </button>
+            <button
+              type="button"
+              className="ccard-menu-item"
+              onClick={(e) => {
+                e.stopPropagation();
+                void downloadCertificate();
+              }}
+            >
+              <Download size={14} /> Download certificate
+            </button>
+            <button
+              type="button"
+              className="ccard-menu-item"
+              onClick={(e) => {
+                e.stopPropagation();
+                shareCertificate();
+              }}
+            >
+              <Link2 size={14} /> Share certificate
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="ccard-icon">⬡</div>
+      <h3>{agent.name}</h3>
+      <p>
+        {cfg.role} · {cfg.model}
+      </p>
+      <div className="ccard-stack">
+        <span className="tag">Freeform</span>
+      </div>
+      <div className="ccard-meta">
+        <span>
+          <b>{agent.forgeScore}</b>/100
+        </span>
+        <span>
+          <b>{agent.xpEarned}</b> XP
+        </span>
+      </div>
+
+      <div className="ccard-actions-v2">
+        <button
+          type="button"
+          className="ccard-btn talk"
+          onClick={(e) => {
+            e.stopPropagation();
+            router.push(`/agent/${agent.id}/chat`);
+          }}
+        >
+          <MessageCircle size={14} /> Talk to Agent
+        </button>
+        <div className="ccard-actions-secondary">
+          <button
+            type="button"
+            className="ccard-btn view"
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push(`/agent/${agent.id}/doc`);
+            }}
+          >
+            <FileText size={13} /> View
+          </button>
+          <button
+            type="button"
+            className="ccard-btn arena"
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push(`/agent/${agent.id}/arena`);
+            }}
+          >
+            <Swords size={13} /> Red Team
+          </button>
+          <button
+            type="button"
+            className="ccard-btn cmp"
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push(`/agent/${agent.id}/compare`);
+            }}
+          >
+            <GitCompare size={13} /> Compare
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScratchCard() {
   const router = useRouter();
   return (
@@ -322,6 +524,7 @@ export default function CampaignMapScreen() {
   const unlockedCampaigns = useGameStore((s) => s.unlockedCampaigns);
   const [shippedRetriever, setShippedRetriever] = useState<ApiForgedAgent | null>(null);
   const [shippedToolAgent, setShippedToolAgent] = useState<ApiForgedAgent | null>(null);
+  const [freeformAgents, setFreeformAgents] = useState<ApiForgedAgent[]>([]);
   const [heroPlayed, setHeroPlayed] = useState(false);
   const toolAgentUnlocked = unlockedCampaigns.includes("tool-agent");
 
@@ -354,6 +557,10 @@ export default function CampaignMapScreen() {
         if (retrieverMatch) setShippedRetriever(retrieverMatch);
         const toolMatch = agents.find((a) => a.campaignId === "tool-agent");
         if (toolMatch) setShippedToolAgent(toolMatch);
+        // Freeform ships always carry campaignId "custom" (see
+        // FreeformBuildScreen's ship()) — every one of them gets its own
+        // card, unlike the fixed campaigns' single card slot each.
+        setFreeformAgents(agents.filter((a) => a.campaignId === "custom"));
       })
       .catch(() => {
         /* no agents yet, or backend unreachable — cards just stay unshipped */
@@ -396,6 +603,12 @@ export default function CampaignMapScreen() {
 
           <BadgeShelf />
 
+          {/* Section 1: templates/build-types — always the same 4 cards,
+              regardless of what the user has already shipped. Content and
+              behavior unchanged from before the split. */}
+          <div className="eyebrow" style={{ marginTop: 28 }}>
+            start a build
+          </div>
           <div className="campaign-grid">
             <ScratchCard />
             <TiltCard campaign={retrieverCampaign} shipped={shippedRetriever} skipEntrance={heroPlayed} />
@@ -418,6 +631,24 @@ export default function CampaignMapScreen() {
               meta="Unlocks after build 2"
             />
           </div>
+
+          {/* Section 2: freeform-shipped agents — "manage what you've
+              already built," kept visually and functionally separate from
+              the templates above so it doesn't get lost as this list
+              grows. Hidden entirely (not an empty header) when there's
+              nothing shipped yet. */}
+          {freeformAgents.length > 0 ? (
+            <>
+              <div className="eyebrow" style={{ marginTop: 40 }}>
+                your agents
+              </div>
+              <div className="campaign-grid">
+                {freeformAgents.map((agent) => (
+                  <FreeformAgentCard key={agent.id} agent={agent} skipEntrance={heroPlayed} />
+                ))}
+              </div>
+            </>
+          ) : null}
         </div>
 
         <aside>

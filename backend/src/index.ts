@@ -13,6 +13,7 @@ import leaderboardRoutes from "./routes/leaderboard";
 import authRoutes from "./routes/auth";
 import knowledgeRoutes from "./routes/knowledge";
 import toolRoutes from "./routes/tools";
+import redteamRoutes from "./routes/redteam";
 
 const app = express();
 
@@ -31,6 +32,7 @@ app.use("/api/leaderboard", leaderboardRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/tools", toolRoutes);
+app.use("/api/redteam", redteamRoutes);
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   createAgent,
   saveProgress,
+  getProgress,
   LyzrNotConfiguredError,
   type ApiForgedAgent,
 } from "@/lib/api";
@@ -70,6 +71,25 @@ const MISSION_META: Record<MissionKey, { difficulty: string; estimateMin: number
   upload: { difficulty: "Easy", estimateMin: 4 },
 };
 
+/** Everything needed to resume an in-progress freeform build exactly where
+ * it was left off — persisted to the same `users.build_slot_values` JSON
+ * column campaign builds already autosave into (one active build at a
+ * time, same as campaigns: `activeCampaignId: "freeform"` is the marker),
+ * under a single key so no backend schema change is needed. */
+interface FreeformSnapshot {
+  draft: AgentDraft;
+  rawTemp: string;
+  rawTopK: string;
+  current: MissionKey;
+  completed: MissionKey[];
+  wantsKnowledge: boolean;
+  wantsTools: boolean;
+  startedLevels: LevelId[];
+  startedAt: number;
+  xpEarnedSoFar: number;
+}
+const FREEFORM_SNAPSHOT_KEY = "__freeform";
+
 export default function FreeformBuildScreen({ templateId }: { templateId?: string }) {
   const router = useRouter();
   const addXp = useGameStore((s) => s.addXp);
@@ -130,6 +150,14 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   const sessionIdRef = useRef(crypto.randomUUID());
   const consoleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const consoleId = useRef(0);
+  const [resumeChecked, setResumeChecked] = useState(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Mirrors `created` synchronously (setCreated itself is async and hasn't
+  // flushed by the time ship() calls awardMission(), which schedules an
+  // autosave of its own — without this, that stale-closure autosave would
+  // fire ~900ms later and re-write the very record ship() just told the
+  // backend to clear).
+  const createdRef = useRef<ApiForgedAgent | null>(null);
 
   const update = (patch: Partial<AgentDraft>) => setDraft((d) => ({ ...d, ...patch }));
 
@@ -148,6 +176,89 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   const ctx: LintCtx = { draft, rawTemp, rawTopK };
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
+
+  // Mirrors every render's latest values into a ref so the debounced
+  // autosave below (fired from a setTimeout, which otherwise closes over
+  // whatever these were at schedule-time) always persists what's actually
+  // on screen, not a stale snapshot from the keystroke that scheduled it.
+  const liveStateRef = useRef({ draft, rawTemp, rawTopK, current, completed, wantsKnowledge, wantsTools, startedLevels });
+  liveStateRef.current = { draft, rawTemp, rawTopK, current, completed, wantsKnowledge, wantsTools, startedLevels };
+
+  // ---- resume: one active freeform build at a time, same as campaigns ----
+  // A `?template=` entry is an explicit "start fresh from this template"
+  // action, so it skips the resume check entirely rather than silently
+  // discarding or fighting over a different in-progress draft.
+  useEffect(() => {
+    if (templateId) {
+      setResumeChecked(true);
+      return;
+    }
+    getProgress(getUserId())
+      .then((progress) => {
+        const raw = progress.activeCampaignId === "freeform" ? progress.slotValues[FREEFORM_SNAPSHOT_KEY] : undefined;
+        if (raw) {
+          try {
+            const snap = JSON.parse(raw) as FreeformSnapshot;
+            setDraft(snap.draft);
+            setRawTemp(snap.rawTemp);
+            setRawTopK(snap.rawTopK);
+            setWantsKnowledge(snap.wantsKnowledge);
+            setWantsTools(snap.wantsTools);
+            setCompleted(new Set(snap.completed));
+            setStartedLevels(new Set(snap.startedLevels));
+            setCurrent(snap.current);
+            setView("editor");
+            xpAwarded.current = new Set(snap.completed);
+            xpEarnedRef.current = snap.xpEarnedSoFar;
+            startedAt.current = snap.startedAt;
+            showToast(
+              "↺",
+              `Resumed — ${snap.completed.length} mission${snap.completed.length === 1 ? "" : "s"} already done`
+            );
+          } catch {
+            /* corrupt/old-shape snapshot — ignore, start fresh */
+          }
+        }
+      })
+      .catch(() => {
+        /* backend unreachable — nothing to resume, start fresh */
+      })
+      .finally(() => setResumeChecked(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Debounced, backend-persisted autosave — fires on every field edit and
+   * at mission-navigation checkpoints, matching how the campaign build
+   * flow autosaves on every slot fill. No-ops once shipped: `ship()`
+   * already clears this same record server-side (see backend agent.ts),
+   * so there is nothing left to resume into. */
+  const scheduleAutosave = () => {
+    if (createdRef.current) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      const s = liveStateRef.current;
+      const snap: FreeformSnapshot = {
+        draft: s.draft,
+        rawTemp: s.rawTemp,
+        rawTopK: s.rawTopK,
+        current: s.current,
+        completed: Array.from(s.completed),
+        wantsKnowledge: s.wantsKnowledge,
+        wantsTools: s.wantsTools,
+        startedLevels: Array.from(s.startedLevels),
+        startedAt: startedAt.current,
+        xpEarnedSoFar: xpEarnedRef.current,
+      };
+      saveProgress(getUserId(), {
+        activeCampaignId: "freeform",
+        currentMissionIndex: 0,
+        slotValues: { [FREEFORM_SNAPSHOT_KEY]: JSON.stringify(snap) },
+        buildTimerSeconds: 0,
+      }).catch(() => {
+        /* non-blocking — worst case this edit isn't resumable, nothing else breaks */
+      });
+    }, 900);
+  };
 
   // Ship is gated on the same lint as every field-bearing mission.
   const canShip = shipBlockingCount(missions, ctx) === 0 && !created;
@@ -174,6 +285,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   /** Debounced console line for the just-edited field, using the SAME
    * lintField the badges/gating use — the streaming log mirrors the gate. */
   const onFieldEdit = (field: FieldKey) => {
+    scheduleAutosave();
     clearTimeout(consoleTimer.current);
     consoleTimer.current = setTimeout(() => {
       const line = lintField(field, ctxRef.current);
@@ -191,6 +303,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
   };
 
   useEffect(() => () => clearTimeout(consoleTimer.current), []);
+  useEffect(() => () => clearTimeout(saveTimer.current), []);
 
   // ---- navigation ----
   /** Enter a mission. If its level hasn't shown its Level-intro yet, show
@@ -204,11 +317,13 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
     const lvlId = levelForMission(key).id;
     setView(startedLevels.has(lvlId) ? "overview" : "level");
     window.scrollTo({ top: 0, behavior: "smooth" });
+    scheduleAutosave();
   };
 
   const startLevel = (lvlId: LevelId) => {
     setStartedLevels((prev) => new Set(prev).add(lvlId));
     setView("overview");
+    scheduleAutosave();
   };
 
   const awardMission = (mission: FreeformMission) => {
@@ -223,6 +338,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
         /* non-blocking — HUD already updated */
       });
     }
+    scheduleAutosave();
   };
 
   /** Complete a field/tool mission (Continue button) and advance. Ship and
@@ -261,6 +377,8 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
         })),
       });
       setCreated(result);
+      createdRef.current = result;
+      clearTimeout(saveTimer.current);
       showToast("🚀", "Agent shipped — a real Lyzr agent is live.");
       // Ship is a real mission — award its XP now that the agent exists.
       awardMission(getMission("ship"));
@@ -282,6 +400,7 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
 
   const shipAnother = () => {
     setCreated(null);
+    createdRef.current = null;
     setDraft(blankDraft());
     setRawTemp(String(blankDraft().temperature));
     setRawTopK(String(blankDraft().knowledge?.topK ?? 4));
@@ -315,6 +434,17 @@ export default function FreeformBuildScreen({ templateId }: { templateId?: strin
       </button>
     </div>
   );
+
+  // Wait for the resume check before rendering anything — otherwise a
+  // resumable build flashes its default Level 1/blank-draft state for a
+  // moment before snapping to whatever was actually restored.
+  if (!resumeChecked) {
+    return (
+      <div className="mx-auto max-w-[720px] px-6 py-24 text-center">
+        <p className="font-mono text-[12px] text-mute">Loading your build…</p>
+      </div>
+    );
+  }
 
   // ---- Level-intro pre-screen (reuses MissionIntro; shown once per level
   //      before that level's first mission overview) ----
