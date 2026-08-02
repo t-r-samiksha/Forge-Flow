@@ -9,4 +9,3 @@ frontend/.next/
 .env.local
 
 dist/
-build/
