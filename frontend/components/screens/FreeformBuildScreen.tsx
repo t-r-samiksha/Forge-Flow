@@ -27,6 +27,7 @@ import {
   type LevelId,
 } from "@/lib/freeformMissions";
 import { lintField, fieldOwnerMission, type FieldKey, type LintCtx } from "@/lib/freeformLint";
+import { MISSION_META } from "@/lib/freeformMissionMeta";
 import { buildFreeformBlueprint, blueprintLiveState } from "@/lib/freeformBlueprint";
 import { showToast } from "@/lib/effects";
 import { useGameStore } from "@/lib/store";
@@ -49,21 +50,6 @@ function fieldLabel(text: string) {
 
 const inputCls =
   "w-full rounded-lg border border-line bg-code-bg px-3 py-2.5 font-mono text-[13px] text-text outline-none focus:border-violet";
-
-/** Presentational-only metadata for the Situation Report chips — authored
- * per mission the same way the legacy campaigns authored `difficulty` /
- * `estimateMin` (not computed, not from an API). Kept here rather than in
- * freeformMissions.ts so the verified §19 logic module stays untouched. */
-const MISSION_META: Record<MissionKey, { difficulty: string; estimateMin: number }> = {
-  identity: { difficulty: "Easy", estimateMin: 4 },
-  instructions: { difficulty: "Medium", estimateMin: 8 },
-  model: { difficulty: "Easy", estimateMin: 5 },
-  retrieval: { difficulty: "Easy", estimateMin: 5 },
-  toolDefine: { difficulty: "Medium", estimateMin: 6 },
-  toolWire: { difficulty: "Easy", estimateMin: 4 },
-  ship: { difficulty: "Easy", estimateMin: 3 },
-  upload: { difficulty: "Easy", estimateMin: 4 },
-};
 
 /** Everything needed to resume an in-progress freeform build exactly where
  * it was left off — persisted to the same `users.build_slot_values` JSON

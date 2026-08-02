@@ -26,12 +26,31 @@ import { listAgents, deleteAgent, type ApiForgedAgent } from "@/lib/api";
 import { getUserId, initAuth } from "@/lib/session";
 import { useGameStore } from "@/lib/store";
 import { getCampaign, type Campaign } from "@/lib/campaigns";
+import { activeMissions } from "@/lib/freeformMissions";
+import { getTemplateLevelDefaults } from "@/lib/agentTemplates";
+import { MISSION_META } from "@/lib/freeformMissionMeta";
 import { freeformShippedConfig } from "@/lib/freeformAgentView";
 import { buildCertData, drawCertificate } from "@/lib/certificate";
 import { buildShareUrl } from "@/lib/share";
 import { showToast } from "@/lib/effects";
 import BadgeShelf from "@/components/gamification/BadgeShelf";
 import LeaderboardWidget from "@/components/gamification/LeaderboardWidget";
+
+/** Real card stats for a template, computed from the same activeMissions()
+ * the actual build flow uses — replaces campaigns.ts's static card.missionsCount
+ * /estimateMin/totalXP, which went stale after the Levels/Missions
+ * restructuring (§21) turned each 2-mission legacy campaign into a real
+ * 6-mission freeform build (§37: found live, cards still said "2
+ * missions · 75 XP" for both Retriever and Tool-Using Agent). */
+function realCardStats(campaignId: string): { missionsCount: number; estimateMin: number; totalXP: number } {
+  const { wantsKnowledge, wantsTools } = getTemplateLevelDefaults(campaignId);
+  const missions = activeMissions({ wantsKnowledge: !!wantsKnowledge, wantsTools: !!wantsTools });
+  return {
+    missionsCount: missions.length,
+    estimateMin: missions.reduce((s, m) => s + MISSION_META[m.key].estimateMin, 0),
+    totalXP: missions.reduce((s, m) => s + m.reward, 0),
+  };
+}
 
 const HERO_WORDS: { text: string; accent?: boolean; br?: boolean }[] = [
   { text: "Ship" },
@@ -141,6 +160,8 @@ function TiltCard({
 
   const handleLeave = () => setStyle({});
 
+  const cardStats = realCardStats(campaign.id);
+
   return (
     <div
       ref={cardRef}
@@ -233,13 +254,13 @@ function TiltCard({
       </div>
       <div className="ccard-meta">
         <span>
-          <b>{campaign.card.missionsCount}</b> missions
+          <b>{cardStats.missionsCount}</b> missions
         </span>
         <span>
-          <b>{campaign.card.estimateMin}</b> min
+          <b>~{cardStats.estimateMin}</b> min
         </span>
         <span>
-          <b>{campaign.card.totalXP}</b> XP
+          <b>{cardStats.totalXP}</b> XP
         </span>
       </div>
 
