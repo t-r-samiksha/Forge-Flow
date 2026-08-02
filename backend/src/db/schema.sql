@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY,  -- Supabase auth.users.id (real, verified UUID) going forward; see §36 for the legacy slugify(email) migration path
+  email TEXT,           -- real, verified email from Supabase's JWT — first populated on real sign-in, null for any row that predates real auth
   display_name TEXT,
   xp INTEGER DEFAULT 0,
   rank TEXT DEFAULT 'Recruit',
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS achievements (
 CREATE TABLE IF NOT EXISTS knowledge_docs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
+  user_id TEXT,  -- owner, for real ownership checks (§36) — nullable so pre-migration rows aren't dropped, backfilled via forged_agents.lyzr_agent_id join where resolvable
   filename TEXT NOT NULL,
   chunk_count INTEGER DEFAULT 0,
   char_count INTEGER DEFAULT 0,
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS knowledge_docs (
 CREATE TABLE IF NOT EXISTS tool_defs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
+  user_id TEXT,  -- owner, for real ownership checks (§36) — nullable, same backfill note as knowledge_docs
   tool_name TEXT NOT NULL,
   description TEXT,
   params_schema TEXT,       -- JSON: { paramName: "string" | "number" | "boolean" }
@@ -77,6 +80,7 @@ CREATE TABLE IF NOT EXISTS crew_members (
 CREATE TABLE IF NOT EXISTS redteam_runs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,        -- forged_agents.id (internal row id)
+  user_id TEXT,                  -- owner, for real ownership checks (§36) — nullable, same backfill note as knowledge_docs
   agent_version INTEGER NOT NULL, -- forged_agents.version at run time, for before/after re-forge comparison
   category TEXT NOT NULL,        -- e.g. prompt_injection, off_topic_bait, data_exfiltration, jailbreak_roleplay, contradiction_trap
   prompt TEXT NOT NULL,          -- real, Redcap-generated, tailored to the target agent's role+instructions

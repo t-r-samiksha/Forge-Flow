@@ -8,6 +8,7 @@ import RouteTransition from "@/components/layout/RouteTransition";
 import MentorPanel from "@/components/layout/MentorPanel";
 import TimerTicker from "@/components/layout/TimerTicker";
 import ProgressSync from "@/components/layout/ProgressSync";
+import AuthBoot from "@/components/layout/AuthBoot";
 import Toast from "@/components/gamification/Toast";
 import LevelUpBurst from "@/components/gamification/LevelUpBurst";
 
@@ -31,6 +32,7 @@ export default function RootLayout({
       <body>
         <AmbientBackground />
         <BootSequence />
+        <AuthBoot />
         <ProgressSync />
         <TimerTicker />
         <Toast />

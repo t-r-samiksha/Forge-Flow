@@ -4,8 +4,16 @@ import { createLyzrAgent, deleteLyzrAgent, LyzrConfigError } from "../services/l
 import { calcForgeScore } from "../services/forgeScoring";
 import { copyToolDefs, toolContractForAgent, getToolRows, rowsToInputs } from "./tools";
 import { validateToolDef } from "../services/tools";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
 
 const router = Router();
+router.use(requireAuth);
+
+// The :userId path segment on every route below is kept only for the
+// existing REST shape — it carries no authority (§36). Every WHERE clause
+// in this file filters on req.userId (the token-verified caller from
+// requireAuth), so a mismatched :userId in the URL/body simply can't see
+// or touch another account's rows: the verified identity always wins.
 
 interface ForgedAgentRow {
   id: string;
@@ -49,21 +57,22 @@ function rowToForgedAgent(row: ForgedAgentRow) {
 router.get("/:userId", (req: Request, res: Response) => {
   const rows = db
     .prepare("SELECT * FROM forged_agents WHERE user_id = ? ORDER BY forged_at DESC")
-    .all(req.params.userId) as ForgedAgentRow[];
+    .all((req as AuthedRequest).userId) as ForgedAgentRow[];
   res.json(rows.map(rowToForgedAgent));
 });
 
 router.get("/:userId/:agentId", (req: Request, res: Response) => {
   const row = db
     .prepare("SELECT * FROM forged_agents WHERE user_id = ? AND id = ?")
-    .get(req.params.userId, req.params.agentId) as ForgedAgentRow | undefined;
+    .get((req as AuthedRequest).userId, req.params.agentId) as ForgedAgentRow | undefined;
   if (!row) return res.status(404).json({ error: "Agent not found" });
   res.json(rowToForgedAgent(row));
 });
 
 router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
   try {
-    const { userId, agentId } = req.params;
+    const userId = (req as AuthedRequest).userId;
+    const { agentId } = req.params;
     const { updatedSlots, instructions, model, temperature, estimateMin } = (req.body ?? {}) as {
       updatedSlots?: Record<string, string>;
       instructions?: string;
@@ -116,7 +125,7 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
       model,
       temperature: Number(temperature),
     });
-    if (toolContract) copyToolDefs(row.lyzr_agent_id, newLyzrId);
+    if (toolContract) copyToolDefs(row.lyzr_agent_id, newLyzrId, userId);
 
     const topKRaw = parseInt(nextConfig.ret ?? "", 10);
     const forgeScore = calcForgeScore(
@@ -166,7 +175,8 @@ router.put("/:userId/:agentId/config", async (req: Request, res: Response) => {
  * that no longer exists. */
 router.delete("/:userId/:agentId", async (req: Request, res: Response) => {
   try {
-    const { userId, agentId } = req.params;
+    const userId = (req as AuthedRequest).userId;
+    const { agentId } = req.params;
     const row = db
       .prepare("SELECT * FROM forged_agents WHERE user_id = ? AND id = ?")
       .get(userId, agentId) as ForgedAgentRow | undefined;

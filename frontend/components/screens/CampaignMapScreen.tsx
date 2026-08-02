@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { reducedMotion } from "@/lib/effects";
 import { listAgents, deleteAgent, type ApiForgedAgent } from "@/lib/api";
-import { getUserId } from "@/lib/session";
+import { getUserId, initAuth } from "@/lib/session";
 import { useGameStore } from "@/lib/store";
 import { getCampaign, type Campaign } from "@/lib/campaigns";
 import { freeformShippedConfig } from "@/lib/freeformAgentView";
@@ -622,7 +622,12 @@ export default function CampaignMapScreen() {
     // Non-blocking: the hero + grid paint immediately with the default
     // "not shipped" card; this just upgrades the Retriever card in place
     // once (if) a shipped agent is found. Never gates the initial render.
-    listAgents(getUserId())
+    // Waits for initAuth() first (§36) — getUserId() called before the
+    // real Supabase session finishes loading returns "", which used to
+    // freeze this call's URL with an empty id and never retry, silently
+    // leaving a genuinely signed-in user's real agent cards unloaded.
+    initAuth()
+      .then(() => listAgents(getUserId()))
       .then((agents) => {
         const retrieverMatch = agents.find((a) => a.campaignId === "retriever");
         if (retrieverMatch) setShippedRetriever(retrieverMatch);

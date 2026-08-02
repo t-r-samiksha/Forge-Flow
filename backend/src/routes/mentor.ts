@@ -13,8 +13,11 @@ import {
   QdrantConfigError,
 } from "../services/qdrant";
 import { FORGEFLOW_DOCS_CONTENT } from "../data/forgeflowDocsContent";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsForgedAgentId } from "../services/ownership";
 
 const router = Router();
+router.use(requireAuth);
 
 /** Internal/admin seed endpoint (FORGEFLOW_V3_SPEC.md §8/§9) — chunks and
  * embeds ForgeFlow's own documentation and upserts it into the real
@@ -23,7 +26,10 @@ const router = Router();
  * knowledge. Deletes and recreates the collection first so re-running
  * this (e.g. after editing the docs content) doesn't leave stale
  * duplicate chunks behind — meant to be run once per real content change,
- * not per request. */
+ * not per request. Gated by requireAuth (any real signed-in caller, no
+ * anonymous access) — there's no admin/role concept anywhere in this app
+ * yet to restrict it further than that; a real per-role gate is a
+ * separate, out-of-scope concern from §36's real-auth migration. */
 router.post("/ingest-docs", async (req: Request, res: Response) => {
   try {
     const chunks = chunkText(FORGEFLOW_DOCS_CONTENT, 400, 40);
@@ -118,40 +124,45 @@ function withAgentContext(message: string, agentId: string | undefined): string 
 
 router.post("/chat", async (req: Request, res: Response) => {
   try {
-    const { message, context, userId, sessionId, agentId } = (req.body ?? {}) as {
+    const userId = (req as AuthedRequest).userId;
+    const { message, context, sessionId, agentId } = (req.body ?? {}) as {
       message?: string;
       context?: string;
-      userId?: string;
       sessionId?: string;
       agentId?: string;
     };
     if (!message) {
       return res.status(400).json({ error: "message is required" });
     }
+    // Real ownership gate (§36) — agentId is optional (Nova works fine
+    // platform-wide with none), but if this question was asked from a
+    // specific agent's Doc page, that agent must actually belong to the
+    // caller — otherwise anyone could pull any agent's real config/forge
+    // score into a Nova answer just by supplying its id.
+    if (agentId && !ownsForgedAgentId(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
 
     const docsGrounded = await withForgeflowDocsContext(message);
     const fullyGrounded = withAgentContext(docsGrounded, agentId);
     const prompt = context ? `Context: ${context}. Question: ${fullyGrounded}` : fullyGrounded;
-    const resolvedUserId = userId || "anon";
     const resolvedSessionId = sessionId || uuidv4();
 
-    const { response } = await chatWithMentorAgent(prompt, resolvedUserId, resolvedSessionId);
+    const { response } = await chatWithMentorAgent(prompt, userId, resolvedSessionId);
 
     const newAchievements: string[] = [];
-    if (userId) {
-      db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
-        userId,
-        new Date().toISOString().slice(0, 10)
-      );
-      db.prepare(
-        "UPDATE users SET mentor_questions_asked = COALESCE(mentor_questions_asked, 0) + 1 WHERE id = ?"
-      ).run(userId);
-      const row = db.prepare("SELECT mentor_questions_asked FROM users WHERE id = ?").get(userId) as
-        | { mentor_questions_asked: number }
-        | undefined;
-      if ((row?.mentor_questions_asked ?? 0) >= 10 && awardAchievement(userId, "mentors_favorite")) {
-        newAchievements.push("mentors_favorite");
-      }
+    db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
+      userId,
+      new Date().toISOString().slice(0, 10)
+    );
+    db.prepare(
+      "UPDATE users SET mentor_questions_asked = COALESCE(mentor_questions_asked, 0) + 1 WHERE id = ?"
+    ).run(userId);
+    const row = db.prepare("SELECT mentor_questions_asked FROM users WHERE id = ?").get(userId) as
+      | { mentor_questions_asked: number }
+      | undefined;
+    if ((row?.mentor_questions_asked ?? 0) >= 10 && awardAchievement(userId, "mentors_favorite")) {
+      newAchievements.push("mentors_favorite");
     }
 
     return res.json({ response, newAchievements });

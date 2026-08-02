@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db";
 import { awardAchievement } from "../services/achievements";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
 
 const router = Router();
 
@@ -134,12 +135,17 @@ export function loadProgress(userId: string) {
   };
 }
 
-router.get("/:userId", (req: Request, res: Response) => {
-  res.json(loadProgress(String(req.params.userId)));
+// :userId in the URL is kept for the existing REST shape only — every
+// handler below reads req.userId (requireAuth's token-verified identity),
+// never the path param, so nobody can read/write another account's real
+// progress (XP, streak, in-progress build) just by putting a different
+// id in the URL (§36).
+router.get("/:userId", requireAuth, (req: Request, res: Response) => {
+  res.json(loadProgress((req as AuthedRequest).userId));
 });
 
-router.post("/:userId", (req: Request, res: Response) => {
-  const userId = String(req.params.userId);
+router.post("/:userId", requireAuth, (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
   const {
     xp,
     completedMissions,

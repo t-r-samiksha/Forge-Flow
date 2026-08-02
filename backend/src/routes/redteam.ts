@@ -4,8 +4,11 @@ import { db } from "../db";
 import { chatWithRedcapAgent, chatWithLyzrAgent, LyzrConfigError } from "../services/lyzr";
 import { withRetrievedContext, runToolLoop } from "./agent";
 import { awardAchievement } from "../services/achievements";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsForgedAgentId } from "../services/ownership";
 
 const router = Router();
+router.use(requireAuth);
 
 interface ForgedAgentRow {
   id: string;
@@ -137,9 +140,13 @@ function leaksPii(text: string): boolean {
  * real chat+judge round-trip resolves (FIX 2, incremental UI). */
 router.post("/attack/:agentId", async (req: Request, res: Response) => {
   try {
-    const { agentId } = req.params;
-    const { userId } = (req.body ?? {}) as { userId?: string };
-    const resolvedUserId = userId || "anon";
+    const userId = (req as AuthedRequest).userId;
+    const agentId = String(req.params.agentId);
+    // Real ownership gate (§36) — any signed-in caller used to be able to
+    // red-team any agent, owned or not, just by knowing/guessing its id.
+    if (!ownsForgedAgentId(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
 
     const row = db.prepare("SELECT * FROM forged_agents WHERE id = ?").get(agentId) as
       | ForgedAgentRow
@@ -147,7 +154,7 @@ router.post("/attack/:agentId", async (req: Request, res: Response) => {
     if (!row) return res.status(404).json({ error: "Agent not found" });
 
     const { role, instructions } = targetConfig(row);
-    const prompts = await generateAttacks(role, instructions, resolvedUserId, uuidv4());
+    const prompts = await generateAttacks(role, instructions, userId, uuidv4());
 
     return res.json({ prompts, agentVersion: row.version });
   } catch (err) {
@@ -171,16 +178,18 @@ router.post("/attack/:agentId", async (req: Request, res: Response) => {
  * against the target agent and should count the same as manual testing. */
 router.post("/judge", async (req: Request, res: Response) => {
   try {
-    const { agentId, prompt, category, userId } = (req.body ?? {}) as {
+    const userId = (req as AuthedRequest).userId;
+    const { agentId, prompt, category } = (req.body ?? {}) as {
       agentId?: string;
       prompt?: string;
       category?: string;
-      userId?: string;
     };
     if (!agentId || !prompt || !category) {
       return res.status(400).json({ error: "agentId, prompt, and category are required" });
     }
-    const resolvedUserId = userId || "anon";
+    if (!ownsForgedAgentId(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
 
     const row = db.prepare("SELECT * FROM forged_agents WHERE id = ?").get(agentId) as
       | ForgedAgentRow
@@ -199,23 +208,21 @@ router.post("/judge", async (req: Request, res: Response) => {
     // miss), that chat still happened and should still count, the same
     // way /api/agent/chat counts a query regardless of anything after it.
     const newAchievements: string[] = [];
-    if (userId) {
-      db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
-        userId,
-        new Date().toISOString().slice(0, 10)
-      );
-      db.prepare(
-        "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
-      ).run(userId);
-      const userRow = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
-        | { chat_queries_run: number }
-        | undefined;
-      if ((userRow?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
-        newAchievements.push("scientist");
-      }
+    db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
+      userId,
+      new Date().toISOString().slice(0, 10)
+    );
+    db.prepare(
+      "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
+    ).run(userId);
+    const userRow = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
+      | { chat_queries_run: number }
+      | undefined;
+    if ((userRow?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
+      newAchievements.push("scientist");
     }
 
-    let verdict = await judge(prompt, targetResponse, resolvedUserId, uuidv4());
+    let verdict = await judge(prompt, targetResponse, userId, uuidv4());
 
     if (category === "data_exfiltration" && leaksPii(targetResponse)) {
       verdict = {
@@ -232,9 +239,9 @@ router.post("/judge", async (req: Request, res: Response) => {
     const result = { category, prompt, response: targetResponse, ...verdict };
 
     db.prepare(
-      `INSERT INTO redteam_runs (id, agent_id, agent_version, category, prompt, response, verdict, reason, suggestion, run_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
-    ).run(uuidv4(), agentId, row.version, result.category, result.prompt, result.response, result.verdict, result.reason, result.suggestion);
+      `INSERT INTO redteam_runs (id, agent_id, user_id, agent_version, category, prompt, response, verdict, reason, suggestion, run_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    ).run(uuidv4(), agentId, userId, row.version, result.category, result.prompt, result.response, result.verdict, result.reason, result.suggestion);
 
     return res.json({ result, agentVersion: row.version, newAchievements });
   } catch (err) {
@@ -247,9 +254,14 @@ router.post("/judge", async (req: Request, res: Response) => {
 });
 
 router.get("/:agentId/history", (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
+  const agentId = String(req.params.agentId);
+  if (!ownsForgedAgentId(userId, agentId)) {
+    return res.status(404).json({ error: "Agent not found" });
+  }
   const rows = db
     .prepare(`SELECT * FROM redteam_runs WHERE agent_id = ? ORDER BY agent_version DESC, run_at DESC`)
-    .all(req.params.agentId);
+    .all(agentId);
   res.json(rows);
 });
 

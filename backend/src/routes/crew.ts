@@ -5,8 +5,11 @@ import { chatWithLyzrAgent, LyzrConfigError } from "../services/lyzr";
 import { parseRouteCall, matchesRole } from "../services/crew";
 import { withRetrievedContext, runToolLoop } from "./agent";
 import { awardAchievement } from "../services/achievements";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsCrew } from "../services/ownership";
 
 const router = Router();
+router.use(requireAuth);
 
 interface ForgedAgentRow {
   id: string;
@@ -19,31 +22,32 @@ interface ForgedAgentRow {
  * the crew record before the real agents it references exist"). */
 router.post("/create", (req: Request, res: Response) => {
   try {
-    const { userId, orchestratorForgedAgentId, name, members } = (req.body ?? {}) as {
-      userId?: string;
+    const userId = (req as AuthedRequest).userId;
+    const { orchestratorForgedAgentId, name, members } = (req.body ?? {}) as {
       orchestratorForgedAgentId?: string;
       name?: string;
       members?: { roleLabel: string; forgedAgentId: string }[];
     };
-    if (!userId || !orchestratorForgedAgentId || !Array.isArray(members) || members.length === 0) {
+    if (!orchestratorForgedAgentId || !Array.isArray(members) || members.length === 0) {
       return res
         .status(400)
-        .json({ error: "userId, orchestratorForgedAgentId, and at least one member are required" });
+        .json({ error: "orchestratorForgedAgentId and at least one member are required" });
     }
 
-    // Real referential check — every id here must already be a real,
-    // previously-shipped forged_agents row (never create a crew pointing
-    // at an agent that doesn't exist yet).
-    const checkStmt = db.prepare("SELECT id FROM forged_agents WHERE id = ?");
-    if (!checkStmt.get(orchestratorForgedAgentId)) {
-      return res.status(400).json({ error: "orchestratorForgedAgentId does not reference a real shipped agent" });
+    // Real referential AND ownership check — every id here must already be
+    // a real, previously-shipped forged_agents row that belongs to this
+    // caller (§36: before this, any existing agentId — including someone
+    // else's — could be wired into a crew you didn't build).
+    const checkStmt = db.prepare("SELECT id FROM forged_agents WHERE id = ? AND user_id = ?");
+    if (!checkStmt.get(orchestratorForgedAgentId, userId)) {
+      return res.status(400).json({ error: "orchestratorForgedAgentId does not reference a real agent you own" });
     }
     for (const m of members) {
       if (!m.forgedAgentId || !m.roleLabel) {
         return res.status(400).json({ error: "each member needs a roleLabel and forgedAgentId" });
       }
-      if (!checkStmt.get(m.forgedAgentId)) {
-        return res.status(400).json({ error: `member forgedAgentId ${m.forgedAgentId} does not reference a real shipped agent` });
+      if (!checkStmt.get(m.forgedAgentId, userId)) {
+        return res.status(400).json({ error: `member forgedAgentId ${m.forgedAgentId} does not reference a real agent you own` });
       }
     }
 
@@ -65,8 +69,12 @@ router.post("/create", (req: Request, res: Response) => {
 });
 
 router.get("/:crewId", (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
+  // Real ownership gate (§36) — any crewId used to be readable by anyone.
+  if (!ownsCrew(userId, String(req.params.crewId))) {
+    return res.status(404).json({ error: "Crew not found" });
+  }
   const crew = db.prepare("SELECT * FROM crews WHERE id = ?").get(req.params.crewId);
-  if (!crew) return res.status(404).json({ error: "Crew not found" });
   const members = db
     .prepare("SELECT * FROM crew_members WHERE crew_id = ?")
     .all(req.params.crewId);
@@ -81,13 +89,16 @@ router.get("/:crewId", (req: Request, res: Response) => {
  * simulated routing, no canned response — every branch is a real Lyzr call. */
 router.post("/:crewId/chat", async (req: Request, res: Response) => {
   try {
-    const { crewId } = req.params;
-    const { message, sessionId, userId } = (req.body ?? {}) as {
+    const userId = (req as AuthedRequest).userId;
+    const crewId = String(req.params.crewId);
+    const { message, sessionId } = (req.body ?? {}) as {
       message?: string;
       sessionId?: string;
-      userId?: string;
     };
     if (!message) return res.status(400).json({ error: "message is required" });
+    if (!ownsCrew(userId, crewId)) {
+      return res.status(404).json({ error: "Crew not found" });
+    }
 
     const crew = db.prepare("SELECT * FROM crews WHERE id = ?").get(crewId) as
       | { id: string; orchestrator_agent_id: string }
@@ -142,20 +153,18 @@ router.post("/:crewId/chat", async (req: Request, res: Response) => {
     }
 
     const newAchievements: string[] = [];
-    if (userId) {
-      db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
-        userId,
-        new Date().toISOString().slice(0, 10)
-      );
-      db.prepare(
-        "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
-      ).run(userId);
-      const row = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
-        | { chat_queries_run: number }
-        | undefined;
-      if ((row?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
-        newAchievements.push("scientist");
-      }
+    db.prepare(`INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`).run(
+      userId,
+      new Date().toISOString().slice(0, 10)
+    );
+    db.prepare(
+      "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
+    ).run(userId);
+    const row = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
+      | { chat_queries_run: number }
+      | undefined;
+    if ((row?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
+      newAchievements.push("scientist");
     }
 
     return res.json({ response: finalResponse, routedTo, newAchievements });

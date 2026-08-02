@@ -17,6 +17,8 @@ import {
   type ToolDefInput,
 } from "../services/tools";
 import { getToolRows, insertToolDef } from "./tools";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsLyzrAgent } from "../services/ownership";
 
 const router = Router();
 
@@ -161,10 +163,13 @@ export async function withRetrievedContext(agentId: string, message: string): Pr
   }
 }
 
-router.post("/create", async (req: Request, res: Response) => {
+router.post("/create", requireAuth, async (req: Request, res: Response) => {
   try {
+    // The real, verified caller (§36) — any userId the client also sends
+    // in the body is ignored for ownership purposes; this agent is always
+    // created under the identity requireAuth actually confirmed.
+    const userId = (req as AuthedRequest).userId;
     const {
-      userId,
       campaignId,
       name,
       instructions,
@@ -183,7 +188,7 @@ router.post("/create", async (req: Request, res: Response) => {
       templateId,
     } = req.body ?? {};
 
-    if (!userId || !name || !instructions || !model || temperature === undefined) {
+    if (!name || !instructions || !model || temperature === undefined) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
@@ -219,7 +224,7 @@ router.post("/create", async (req: Request, res: Response) => {
 
     // Persist the executable registry now that we have the real agent_id
     // (tool_defs, like knowledge_docs, are keyed by the Lyzr agent id).
-    for (const tool of toolDefs) insertToolDef(agentId, tool);
+    for (const tool of toolDefs) insertToolDef(agentId, tool, userId);
     if (toolDefs.length > 0) {
       console.log(`[tools] baked contract for ${toolDefs.length} tool(s) into agentId=${agentId}`);
     }
@@ -322,11 +327,19 @@ router.post("/create", async (req: Request, res: Response) => {
   }
 });
 
-router.post("/chat", async (req: Request, res: Response) => {
+router.post("/chat", requireAuth, async (req: Request, res: Response) => {
   try {
-    const { agentId, message, sessionId, userId } = req.body ?? {};
+    const userId = (req as AuthedRequest).userId;
+    const { agentId, message, sessionId } = req.body ?? {};
     if (!agentId || !message) {
       return res.status(400).json({ error: "agentId and message are required" });
+    }
+    // Real ownership gate (§36) — agentId here is the Lyzr agent_id;
+    // without this, any signed-in caller could chat with (and rack up
+    // XP/achievements against) an agent they don't own, just by knowing
+    // or guessing its id.
+    if (!ownsLyzrAgent(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
     }
     const session = sessionId ?? uuidv4();
     const groundedMessage = await withRetrievedContext(agentId, message);
@@ -336,19 +349,19 @@ router.post("/chat", async (req: Request, res: Response) => {
     const response = await runToolLoop(agentId, session, rawResponse);
 
     const newAchievements: string[] = [];
-    if (userId) {
-      db.prepare(
-        `INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`
-      ).run(userId, new Date().toISOString().slice(0, 10));
-      db.prepare(
-        "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
-      ).run(userId);
-      const row = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
-        | { chat_queries_run: number }
-        | undefined;
-      if ((row?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
-        newAchievements.push("scientist");
-      }
+    // userId is always present here (requireAuth), unlike before when this
+    // whole block was conditional on an optional, client-supplied field.
+    db.prepare(
+      `INSERT OR IGNORE INTO users (id, last_forge_date) VALUES (?, ?)`
+    ).run(userId, new Date().toISOString().slice(0, 10));
+    db.prepare(
+      "UPDATE users SET chat_queries_run = COALESCE(chat_queries_run, 0) + 1 WHERE id = ?"
+    ).run(userId);
+    const row = db.prepare("SELECT chat_queries_run FROM users WHERE id = ?").get(userId) as
+      | { chat_queries_run: number }
+      | undefined;
+    if ((row?.chat_queries_run ?? 0) >= 20 && awardAchievement(userId, "scientist")) {
+      newAchievements.push("scientist");
     }
 
     return res.json({ response, newAchievements });
@@ -367,7 +380,11 @@ router.post("/chat", async (req: Request, res: Response) => {
  * commit", so a preview shouldn't show up in the user's agent list,
  * leaderboard, or earn achievements. Finalizing (PUT .../config) is what
  * actually persists a config change. */
-router.post("/preview", async (req: Request, res: Response) => {
+// No ownership check needed (nothing is read or persisted here — a real
+// but ephemeral Lyzr agent + one message, never written to forged_agents),
+// but still gated behind a real signed-in caller so an anonymous stranger
+// can't spend this app's real Lyzr quota for free.
+router.post("/preview", requireAuth, async (req: Request, res: Response) => {
   try {
     const { name, instructions, model, temperature, message, role, goal, description } =
       req.body ?? {};

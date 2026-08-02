@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: forgeflow-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    plan: starter
+    disk:
+      # Critical (§37): without this, better-sqlite3's file is wiped on
+      # every redeploy/restart — Render's default filesystem is NOT
+      # persistent. This must be attached for real data to survive.
+      name: forgeflow-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/agentforge.db
+      - key: PORT
+        value: 4000
+      - key: FRONTEND_URL
+        sync: false
+      - key: LYZR_API_KEY
+        sync: false
+      - key: LYZR_MENTOR_AGENT_ID
+        sync: false
+      - key: LYZR_REDCAP_AGENT_ID
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: EMBEDDING_PROVIDER
+        value: google
+      - key: EMBEDDING_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false

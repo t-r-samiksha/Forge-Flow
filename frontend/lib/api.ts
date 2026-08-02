@@ -1,6 +1,42 @@
+import { getAccessToken, initAuth, logout } from "./session";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export class LyzrNotConfiguredError extends Error {}
+
+/** Attaches the real Supabase session token to every API call (§36) —
+ * the single place that happens, so no call site can forget it. Awaits
+ * initAuth() first (cheap after the first call — it caches its own
+ * promise) so a component that fires a protected request on mount
+ * without itself waiting for auth to finish loading (most of them don't)
+ * can't send that request before Supabase's real, already-persisted
+ * session has been read back from storage — that race previously sent a
+ * tokenless request, got a real 401, and genuinely signed a valid,
+ * already-signed-in user back out. A missing token after this still just
+ * means a real unauthenticated request, correctly answered with a real
+ * 401 (handled centrally in handle() below). */
+async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  await initAuth();
+  const token = getAccessToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(url, { ...init, headers });
+}
+
+let redirectingToSignIn = false;
+
+/** Real 401 handling (§36) — a rejected/expired token gets the local
+ * session torn down for real (supabase.auth.signOut(), not just "ignore
+ * it") and the user sent to a real sign-in page, once per redirect rather
+ * than once per failed request if several go out in a burst. */
+function handleUnauthorized() {
+  if (typeof window === "undefined" || redirectingToSignIn) return;
+  redirectingToSignIn = true;
+  void logout().finally(() => {
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    window.location.href = `/sign-in?next=${next}`;
+  });
+}
 
 export interface ApiForgedAgent {
   id: string;
@@ -26,6 +62,11 @@ async function handle<T>(res: Response): Promise<T> {
   if (res.status === 503) {
     const body = await res.json().catch(() => ({}) as { error?: string });
     throw new LyzrNotConfiguredError(body.error ?? "Lyzr is not configured");
+  }
+  if (res.status === 401) {
+    handleUnauthorized();
+    const body = await res.json().catch(() => ({}) as { error?: string });
+    throw new Error(body.error ?? "Session expired — please sign in again.");
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}) as { error?: string });
@@ -73,7 +114,7 @@ export interface CreateAgentPayload {
 export async function createAgent(
   payload: CreateAgentPayload
 ): Promise<ApiForgedAgent & { newAchievements: string[] }> {
-  const res = await fetch(`${API_URL}/api/agent/create`, {
+  const res = await authFetch(`${API_URL}/api/agent/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -87,7 +128,7 @@ export async function chatWithAgent(
   sessionId: string,
   userId?: string
 ): Promise<{ response: string; newAchievements: string[] }> {
-  const res = await fetch(`${API_URL}/api/agent/chat`, {
+  const res = await authFetch(`${API_URL}/api/agent/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agentId, message, sessionId, userId }),
@@ -103,7 +144,7 @@ export async function createCrew(payload: {
   name?: string;
   members: { roleLabel: string; forgedAgentId: string }[];
 }): Promise<{ crewId: string }> {
-  const res = await fetch(`${API_URL}/api/crew/create`, {
+  const res = await authFetch(`${API_URL}/api/crew/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -117,7 +158,7 @@ export interface CrewInfo {
 }
 
 export async function getCrew(crewId: string): Promise<CrewInfo> {
-  const res = await fetch(`${API_URL}/api/crew/${crewId}`);
+  const res = await authFetch(`${API_URL}/api/crew/${crewId}`);
   return handle<CrewInfo>(res);
 }
 
@@ -131,7 +172,7 @@ export async function chatWithCrew(
   sessionId: string,
   userId?: string
 ): Promise<{ response: string; routedTo: string | null; newAchievements: string[] }> {
-  const res = await fetch(`${API_URL}/api/crew/${crewId}/chat`, {
+  const res = await authFetch(`${API_URL}/api/crew/${crewId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, sessionId, userId }),
@@ -153,7 +194,7 @@ export interface PreviewAgentPayload {
 /** Real Lyzr call for Multiverse Compare's Version B — creates a genuine
  * (throwaway) agent and chats it once. Not persisted anywhere server-side. */
 export async function previewAgent(payload: PreviewAgentPayload): Promise<{ response: string }> {
-  const res = await fetch(`${API_URL}/api/agent/preview`, {
+  const res = await authFetch(`${API_URL}/api/agent/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -162,7 +203,7 @@ export async function previewAgent(payload: PreviewAgentPayload): Promise<{ resp
 }
 
 export async function listAgents(userId: string): Promise<ApiForgedAgent[]> {
-  const res = await fetch(`${API_URL}/api/agents/${userId}`);
+  const res = await authFetch(`${API_URL}/api/agents/${userId}`);
   return handle<ApiForgedAgent[]>(res);
 }
 
@@ -190,7 +231,7 @@ export async function attackRedTeam(
   userId: string,
   agentId: string
 ): Promise<{ prompts: RedTeamAttack[]; agentVersion: number }> {
-  const res = await fetch(`${API_URL}/api/redteam/attack/${agentId}`, {
+  const res = await authFetch(`${API_URL}/api/redteam/attack/${agentId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId }),
@@ -206,7 +247,7 @@ export async function judgeRedTeam(
   agentId: string,
   attack: RedTeamAttack
 ): Promise<{ result: RedTeamResult; agentVersion: number; newAchievements: string[] }> {
-  const res = await fetch(`${API_URL}/api/redteam/judge`, {
+  const res = await authFetch(`${API_URL}/api/redteam/judge`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId, agentId, prompt: attack.prompt, category: attack.category }),
@@ -222,12 +263,12 @@ export interface RedTeamHistoryRow extends RedTeamResult {
 }
 
 export async function getRedTeamHistory(agentId: string): Promise<RedTeamHistoryRow[]> {
-  const res = await fetch(`${API_URL}/api/redteam/${agentId}/history`);
+  const res = await authFetch(`${API_URL}/api/redteam/${agentId}/history`);
   return handle<RedTeamHistoryRow[]>(res);
 }
 
 export async function getAgent(userId: string, agentId: string): Promise<ApiForgedAgent> {
-  const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}`);
+  const res = await authFetch(`${API_URL}/api/agents/${userId}/${agentId}`);
   return handle<ApiForgedAgent>(res);
 }
 
@@ -235,7 +276,7 @@ export async function getAgent(userId: string, agentId: string): Promise<ApiForg
  * removal (row: new capability). Blocked server-side (409) if this agent
  * is a real Crew member or orchestrator. */
 export async function deleteAgent(userId: string, agentId: string): Promise<{ deleted: true; id: string }> {
-  const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}`, { method: "DELETE" });
+  const res = await authFetch(`${API_URL}/api/agents/${userId}/${agentId}`, { method: "DELETE" });
   return handle<{ deleted: true; id: string }>(res);
 }
 
@@ -256,7 +297,7 @@ export interface ProgressState {
 }
 
 export async function getProgress(userId: string): Promise<ProgressState> {
-  const res = await fetch(`${API_URL}/api/progress/${userId}`);
+  const res = await authFetch(`${API_URL}/api/progress/${userId}`);
   return handle<ProgressState>(res);
 }
 
@@ -268,27 +309,13 @@ export async function saveProgress(
    * handler, where a normal fetch would otherwise be aborted mid-flight. */
   opts?: { keepalive?: boolean }
 ): Promise<ProgressState & { newAchievements: string[] }> {
-  const res = await fetch(`${API_URL}/api/progress/${userId}`, {
+  const res = await authFetch(`${API_URL}/api/progress/${userId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     keepalive: opts?.keepalive ?? false,
   });
   return handle<ProgressState & { newAchievements: string[] }>(res);
-}
-
-/** No-password "login" — resolves a typed email to a stable account id
- * server-side and returns that account's full progress in one round
- * trip, so the caller can hydrate the store immediately. */
-export async function loginOrCreateUser(
-  email: string
-): Promise<{ userId: string } & ProgressState> {
-  const res = await fetch(`${API_URL}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
-  });
-  return handle<{ userId: string } & ProgressState>(res);
 }
 
 export interface MentorChatResponse {
@@ -306,7 +333,7 @@ export async function chatWithMentor(
    * doc grounding (FORGEFLOW_V3_SPEC.md §8). */
   agentId?: string | null
 ): Promise<MentorChatResponse> {
-  const res = await fetch(`${API_URL}/api/mentor/chat`, {
+  const res = await authFetch(`${API_URL}/api/mentor/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, context, userId, sessionId, agentId: agentId ?? undefined }),
@@ -332,7 +359,7 @@ export async function reforgeAgent(
   version: number;
   lyzrPayload: Record<string, unknown>;
 }> {
-  const res = await fetch(`${API_URL}/api/agents/${userId}/${agentId}/config`, {
+  const res = await authFetch(`${API_URL}/api/agents/${userId}/${agentId}/config`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -355,7 +382,7 @@ export interface LeaderboardEntry {
 }
 
 export async function getLeaderboard(limit = 20): Promise<LeaderboardEntry[]> {
-  const res = await fetch(`${API_URL}/api/leaderboard?limit=${limit}`);
+  const res = await authFetch(`${API_URL}/api/leaderboard?limit=${limit}`);
   return handle<LeaderboardEntry[]>(res);
 }
 
@@ -375,7 +402,7 @@ export async function uploadKnowledge(
   agentId: string,
   payload: { filename: string; content: string; topK?: number }
 ): Promise<KnowledgeDoc> {
-  const res = await fetch(`${API_URL}/api/knowledge/upload/${agentId}`, {
+  const res = await authFetch(`${API_URL}/api/knowledge/upload/${agentId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -384,7 +411,7 @@ export async function uploadKnowledge(
 }
 
 export async function listKnowledgeDocs(agentId: string): Promise<KnowledgeDoc[]> {
-  const res = await fetch(`${API_URL}/api/knowledge/${agentId}`);
+  const res = await authFetch(`${API_URL}/api/knowledge/${agentId}`);
   return handle<KnowledgeDoc[]>(res);
 }
 
@@ -392,7 +419,7 @@ export async function deleteKnowledgeDoc(
   agentId: string,
   docId: string
 ): Promise<{ deleted: boolean; id: string }> {
-  const res = await fetch(`${API_URL}/api/knowledge/${agentId}/${docId}`, {
+  const res = await authFetch(`${API_URL}/api/knowledge/${agentId}/${docId}`, {
     method: "DELETE",
   });
   return handle<{ deleted: boolean; id: string }>(res);
@@ -416,7 +443,7 @@ export async function registerTool(
   agentId: string,
   payload: { toolName: string; description: string; paramsSchema: Record<string, string>; endpointUrl: string }
 ): Promise<ApiToolDef> {
-  const res = await fetch(`${API_URL}/api/tools/${agentId}`, {
+  const res = await authFetch(`${API_URL}/api/tools/${agentId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -425,7 +452,7 @@ export async function registerTool(
 }
 
 export async function listTools(agentId: string): Promise<ApiToolDef[]> {
-  const res = await fetch(`${API_URL}/api/tools/${agentId}`);
+  const res = await authFetch(`${API_URL}/api/tools/${agentId}`);
   return handle<ApiToolDef[]>(res);
 }
 
@@ -433,6 +460,6 @@ export async function deleteTool(
   agentId: string,
   toolId: string
 ): Promise<{ deleted: boolean; id: string }> {
-  const res = await fetch(`${API_URL}/api/tools/${agentId}/${toolId}`, { method: "DELETE" });
+  const res = await authFetch(`${API_URL}/api/tools/${agentId}/${toolId}`, { method: "DELETE" });
   return handle<{ deleted: boolean; id: string }>(res);
 }

@@ -4,8 +4,11 @@ import { db } from "../db";
 import { chunkText } from "../services/chunking";
 import { embedTexts, EmbeddingConfigError } from "../services/embeddings";
 import { upsertChunks, deleteDocChunks, QdrantConfigError } from "../services/qdrant";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsLyzrAgent } from "../services/ownership";
 
 const router = Router();
+router.use(requireAuth);
 
 interface KnowledgeDocRow {
   id: string;
@@ -31,7 +34,14 @@ function rowToDoc(row: KnowledgeDocRow) {
  * rather than multipart, so no extra upload-parsing dependency is needed. */
 router.post("/upload/:agentId", async (req: Request, res: Response) => {
   try {
+    const userId = (req as AuthedRequest).userId;
     const { agentId } = req.params as { agentId: string };
+    // Real ownership gate (§36) — this table had no userId concept at all
+    // before; agentId alone used to be enough to upload documents into any
+    // agent's vector store, owned or not.
+    if (!ownsLyzrAgent(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
     const { filename, content } = (req.body ?? {}) as { filename?: string; content?: string };
     if (!filename || !content || !content.trim()) {
       return res.status(400).json({ error: "filename and content are required" });
@@ -66,9 +76,9 @@ router.post("/upload/:agentId", async (req: Request, res: Response) => {
 
     const now = new Date().toISOString();
     db.prepare(
-      `INSERT INTO knowledge_docs (id, agent_id, filename, chunk_count, char_count, uploaded_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(docId, agentId, filename, chunks.length, content.length, now);
+      `INSERT INTO knowledge_docs (id, agent_id, user_id, filename, chunk_count, char_count, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(docId, agentId, userId, filename, chunks.length, content.length, now);
 
     return res.json({
       id: docId,
@@ -88,6 +98,10 @@ router.post("/upload/:agentId", async (req: Request, res: Response) => {
 });
 
 router.get("/:agentId", (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
+  if (!ownsLyzrAgent(userId, String(req.params.agentId))) {
+    return res.status(404).json({ error: "Agent not found" });
+  }
   const rows = db
     .prepare("SELECT * FROM knowledge_docs WHERE agent_id = ? ORDER BY uploaded_at DESC")
     .all(req.params.agentId) as KnowledgeDocRow[];
@@ -96,7 +110,11 @@ router.get("/:agentId", (req: Request, res: Response) => {
 
 router.delete("/:agentId/:docId", async (req: Request, res: Response) => {
   try {
+    const userId = (req as AuthedRequest).userId;
     const { agentId, docId } = req.params as { agentId: string; docId: string };
+    if (!ownsLyzrAgent(userId, agentId)) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
     const row = db
       .prepare("SELECT * FROM knowledge_docs WHERE agent_id = ? AND id = ?")
       .get(agentId, docId) as KnowledgeDocRow | undefined;

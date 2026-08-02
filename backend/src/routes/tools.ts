@@ -8,6 +8,8 @@ import {
   type ToolDefInput,
   type ToolDefRow,
 } from "../services/tools";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { ownsLyzrAgent } from "../services/ownership";
 
 const router = Router();
 
@@ -46,15 +48,22 @@ export function toolContractForAgent(agentId: string): string {
   return buildToolContract(rowsToInputs(getToolRows(agentId)));
 }
 
-export function insertToolDef(agentId: string, tool: ToolDefInput): ToolDefRow {
+/** userId is required (not inferred) — every real call site already knows
+ * the verified owner (the /create caller, the tools.ts POST handler, or
+ * copyToolDefs carrying the original owner forward on re-forge), so there's
+ * no path where a tool_defs row is written without a real owner attached
+ * (§36 — this table had no user_id column or ownership concept at all
+ * before). */
+export function insertToolDef(agentId: string, tool: ToolDefInput, userId: string): ToolDefRow {
   const id = uuidv4();
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO tool_defs (id, agent_id, tool_name, description, params_schema, endpoint_url, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO tool_defs (id, agent_id, user_id, tool_name, description, params_schema, endpoint_url, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     agentId,
+    userId,
     tool.toolName,
     tool.description,
     JSON.stringify(tool.paramsSchema ?? {}),
@@ -74,16 +83,22 @@ export function insertToolDef(agentId: string, tool: ToolDefInput): ToolDefRow {
 
 /** Re-forge creates a brand-new Lyzr agent_id; tool_defs are keyed by
  * that id, so copy them onto the new agent so the executable registry
- * follows the contract we just baked into the new agent's instructions. */
-export function copyToolDefs(fromAgentId: string, toAgentId: string): void {
+ * follows the contract we just baked into the new agent's instructions.
+ * Ownership carries forward unchanged — re-forging doesn't transfer an
+ * agent to anyone else. */
+export function copyToolDefs(fromAgentId: string, toAgentId: string, userId: string): void {
   const rows = getToolRows(fromAgentId);
   for (const r of rows) {
-    insertToolDef(toAgentId, {
-      toolName: r.tool_name,
-      description: r.description ?? "",
-      paramsSchema: JSON.parse(r.params_schema || "{}") as ParamsSchema,
-      endpointUrl: r.endpoint_url ?? "",
-    });
+    insertToolDef(
+      toAgentId,
+      {
+        toolName: r.tool_name,
+        description: r.description ?? "",
+        paramsSchema: JSON.parse(r.params_schema || "{}") as ParamsSchema,
+        endpointUrl: r.endpoint_url ?? "",
+      },
+      userId
+    );
   }
 }
 
@@ -109,8 +124,14 @@ function parseToolBody(body: unknown): ToolDefInput | { error: string } {
   return { toolName, description, paramsSchema, endpointUrl };
 }
 
-router.post("/:agentId", (req: Request, res: Response) => {
+router.post("/:agentId", requireAuth, (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
   const agentId = String(req.params.agentId);
+  // Real ownership gate (§36) — this endpoint used to accept a tool
+  // registration for ANY agentId with no check it belonged to the caller.
+  if (!ownsLyzrAgent(userId, agentId)) {
+    return res.status(404).json({ error: "Agent not found" });
+  }
   const parsed = parseToolBody(req.body);
   if ("error" in parsed) return res.status(400).json({ error: parsed.error });
 
@@ -134,18 +155,28 @@ router.post("/:agentId", (req: Request, res: Response) => {
     return res.status(409).json({ error: `a tool named "${parsed.toolName}" already exists on this agent` });
   }
 
-  const row = insertToolDef(agentId, parsed);
+  const row = insertToolDef(agentId, parsed, userId);
   console.log(`[tools] registered "${parsed.toolName}" -> ${parsed.endpointUrl} on agentId=${agentId}`);
   return res.json(rowToTool(row));
 });
 
-router.get("/:agentId", (req: Request, res: Response) => {
-  const rows = getToolRows(String(req.params.agentId));
+router.get("/:agentId", requireAuth, (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
+  const agentId = String(req.params.agentId);
+  if (!ownsLyzrAgent(userId, agentId)) {
+    return res.status(404).json({ error: "Agent not found" });
+  }
+  const rows = getToolRows(agentId);
   res.json(rows.map(rowToTool));
 });
 
-router.delete("/:agentId/:toolId", (req: Request, res: Response) => {
-  const { agentId, toolId } = req.params;
+router.delete("/:agentId/:toolId", requireAuth, (req: Request, res: Response) => {
+  const userId = (req as AuthedRequest).userId;
+  const agentId = String(req.params.agentId);
+  const toolId = String(req.params.toolId);
+  if (!ownsLyzrAgent(userId, agentId)) {
+    return res.status(404).json({ error: "Agent not found" });
+  }
   const row = db
     .prepare("SELECT * FROM tool_defs WHERE agent_id = ? AND id = ?")
     .get(agentId, toolId) as ToolDefRow | undefined;
