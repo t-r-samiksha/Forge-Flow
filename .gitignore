@@ -9,3 +9,6 @@ frontend/.next/
 .env.local
 
 dist/
+
+CLAUDE.md
+FORGEFLOW_V3_SPEC.md
